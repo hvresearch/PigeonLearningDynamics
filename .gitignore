@@ -1,0 +1,14 @@
+# Raw / large datasets (regenerate by downloading; too big for git)
+# 2011 Flack raw GPS CSVs (extracted)
+data/
+# 2021 Valentini dataset (incl. 1.23 GB figshare.zip, 2.6 GB extracted)
+2021/
+# raw archives: raw_data.zip, Flack+et+al_*.zip, figshare.zip
+*.zip
+
+# Python
+__pycache__/
+*.pyc
+
+# OS cruft
+.DS_Store
