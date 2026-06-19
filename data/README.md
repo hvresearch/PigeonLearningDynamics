@@ -7,7 +7,7 @@ data deposit; analysis code and the interactive viewer live on the **`hv`** bran
 
 ## 1. Flack et al. (2014) — multi-route homing  *(included here)*
 
-**File:** `flack_etal_2014_homing_routes_gps.zip` (≈22 MB)
+**File:** `flack_2014_homing_routes_gps.zip` (≈22 MB, in this folder)
 
 GPS tracks of homing pigeons released along three routes (`R1`, `R2`, `R3`),
 26 birds each, ~6 release flights per bird (468 flights total). 1 Hz fixes.
@@ -24,7 +24,7 @@ Date, Time, Latitude, Longitude, Altitude, Speed, Course, Type, Distance, Essent
 Unzip with:
 
 ```bash
-unzip flack_etal_2014_homing_routes_gps.zip -d data
+unzip flack_2014_homing_routes_gps.zip -d flack_2014
 ```
 
 ---

@@ -1,12 +1,5 @@
-# Data branch keeps only the small (2011) data zip + docs.
-# Everything else (code lives on the hv branch; large 2021 data is external).
-2021/
-data/
+# Data-deposit branch: papers/ and data/ are tracked.
+# (Code and large external data live on the hv branch / figshare.)
 __pycache__/
 *.pyc
 .DS_Store
-
-# raw / oversized archives (the included 2011 zip is named explicitly, not *.zip)
-raw_data.zip
-Flack+et+al_Biology+Letters.zip
-figshare.zip
