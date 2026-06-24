@@ -54,6 +54,12 @@ device(x) = HAS_CUDA ? gpu(x) : x
 # accepts a `z_dim` keyword to override per-call if needed.
 Z_DIM = 3
 
+# Temporal downsampling: keep every DOWNSAMPLE-th point of each trajectory before
+# feeding it to the VAE. 1 = no downsampling. Larger values shrink the input
+# dimension (input_dim = 2L) proportionally, which makes the big first Dense
+# layer and GPU memory far more manageable.
+DOWNSAMPLE = 10
+
 # ---------------------------------------------------------------------------
 # Depth-parametric VAE (unchanged from p786_project_VAEs.jl)
 # ---------------------------------------------------------------------------
@@ -195,6 +201,10 @@ function load_pigeon_trajectories(; data_root::AbstractString = "data")
     return lats, longs
 end
 
+# Keep every `step`-th point of a trajectory (temporal downsampling). step <= 1
+# returns the trajectory unchanged.
+downsample(v::AbstractVector, step::Int) = step <= 1 ? collect(v) : collect(@view v[1:step:end])
+
 # Number of padding points to place before / after a length-T trajectory in a
 # length-L window. Shared by pad_series and the loss mask so they always agree.
 function pad_counts(T::Int, L::Int, align::Symbol)
@@ -232,11 +242,17 @@ function build_dataset(lats, longs; align::Symbol = :center, normalization::Symb
                        sites = 1:N_SITE)
     site_ids = collect(sites)
     triples  = [(i, j, k) for i in site_ids for j in 1:N_PIGEON for k in 1:N_RUN]  # k fastest
-    L = maximum(length(lats[i, j, k]) for (i, j, k) in triples)      # max trajectory length
+
+    # Temporally downsample every trajectory ONCE (keep every DOWNSAMPLE-th point),
+    # then build everything (max length, normalization, padding) from these.
+    dlat = Dict(t => downsample(lats[t...],  DOWNSAMPLE) for t in triples)
+    dlon = Dict(t => downsample(longs[t...], DOWNSAMPLE) for t in triples)
+
+    L = maximum(length(dlat[t]) for t in triples)                   # max downsampled length
 
     # Flatten every included coordinate once, to compute the shared constants.
-    all_lat = reduce(vcat, (collect(lats[i, j, k])  for (i, j, k) in triples))
-    all_lon = reduce(vcat, (collect(longs[i, j, k]) for (i, j, k) in triples))
+    all_lat = reduce(vcat, (dlat[t] for t in triples))
+    all_lon = reduce(vcat, (dlon[t] for t in triples))
 
     if normalization === :minmax
         lat_a, lat_b = minimum(all_lat), maximum(all_lat) - minimum(all_lat)
@@ -249,7 +265,7 @@ function build_dataset(lats, longs; align::Symbol = :center, normalization::Symb
     end
     lat_b = lat_b == 0 ? 1.0 : lat_b
     lon_b = lon_b == 0 ? 1.0 : lon_b
-    @info "Shared global normalization (same function for every trajectory in this run)" sites = site_ids normalization lat_a lat_b lon_a lon_b
+    @info "Shared global normalization (same function for every trajectory in this run)" sites = site_ids normalization downsample = DOWNSAMPLE max_len = L lat_a lat_b lon_a lon_b
 
     N = length(triples)
     X    = Array{Float32}(undef, 2L, N)
@@ -258,11 +274,12 @@ function build_dataset(lats, longs; align::Symbol = :center, normalization::Symb
     pid  = Vector{Int}(undef, N)
     run  = Vector{Int}(undef, N)
 
-    for (col, (i, j, k)) in enumerate(triples)
-        T = length(lats[i, j, k])
+    for (col, t) in enumerate(triples)
+        i, j, k = t
+        T = length(dlat[t])
         pre, post = pad_counts(T, L, align)
-        plat = pad_series(lats[i, j, k],  L; align = align)
-        plon = pad_series(longs[i, j, k], L; align = align)
+        plat = pad_series(dlat[t], L; align = align)
+        plon = pad_series(dlon[t], L; align = align)
         latn = (plat .- lat_a) ./ lat_b                             # identical map for all trajectories
         lonn = (plon .- lon_a) ./ lon_b
         X[:, col]  = Float32.(vcat(latn, lonn))
@@ -306,18 +323,11 @@ function plot_latent_by_site(model, X, site; z_dim::Int = Z_DIM)
                    group = ["R$s" for s in site], palette = :tab10, legend = :outertopright)
 end
 
-# Same latent space, colored by pigeon id (continuous colorbar, 26 pigeons).
-function plot_latent_by_pigeon(model, X, pid; z_dim::Int = Z_DIM)
-    z = latent_coords(model, X)
-    latent_scatter(z, z_dim, "Pigeon trajectories in VAE latent space (by pigeon)";
-                   zcolor = pid, c = :viridis, colorbar_title = "pigeon id", legend = false)
-end
-
 # Same latent space, colored by homing-run number (1..6) — the within-site
 # "learning dynamics" variable: do later runs converge/separate from early ones?
 function plot_latent_by_run(model, X, run; z_dim::Int = Z_DIM)
     z = latent_coords(model, X)
-    runpal = palette(:viridis, N_RUN)     # 6 DISTINCT colors sampled from viridis
+    runpal = palette(:thermal, N_RUN)     # 6 DISTINCT colors sampled from thermal
     latent_scatter(z, z_dim, "Pigeon trajectories in VAE latent space (by run)";
                    group = ["run $r" for r in run], palette = runpal, legend = :outertopright)
 end
@@ -362,7 +372,6 @@ function run_pigeons(; data_root::AbstractString = "data",
     train!(model, opt, loader, epochs)
 
     display(plot_latent_by_site(model, X, site; z_dim = z_dim))
-    display(plot_latent_by_pigeon(model, X, pid; z_dim = z_dim))
     display(plot_reconstruction(model, X, meta, 1))
 
     return model, (; X, site, pid, run, meta)
@@ -393,21 +402,22 @@ function run_one_site(site_id::Int; data_root::AbstractString = "data",
     else
         train!(model, opt, DataLoader((X, pid); batchsize = batchsize, shuffle = true), epochs)
     end
+    
     return model, (; X, site, pid, run, meta)
 end
 
 # Run R1, R2, R3 each on their OWN VAE (one model per site, trained only on that
-# site's 156 trajectories). Shows a 3x2 grid: rows = release site, columns =
-# latent space colored by pigeon id and by run number. Each site is trained
-# independently with the same seed so the panels are comparable.
+# site's 156 trajectories). Shows one row per release site: the latent space
+# colored by run number. Each site is trained independently with the same seed
+# so the panels are comparable.
 function run_sites_separately(; data_root::AbstractString = "data",
                                 z_dim::Int = Z_DIM,
                                 align::Symbol = :center, normalization::Symbol = :minmax,
-                                hidden_dims::Vector{Int} = [1024, 256, 64, 16],
+                                hidden_dims::Vector{Int} = [256, 128, 32],
                                 epochs::Int = 200, batchsize::Int = 64,
                                 masked::Bool = false, seed::Int = 0)
     preloaded = load_pigeon_trajectories(; data_root = data_root)
-    runpal = palette(:viridis, N_RUN)     # 6 distinct colors, one per run
+    runpal = palette(:thermal, N_RUN)     # 6 distinct colors, one per run
     panels = Any[]
     for s in 1:N_SITE
         println("=== Release site R$s ===")
@@ -416,14 +426,11 @@ function run_sites_separately(; data_root::AbstractString = "data",
                                 batchsize = batchsize, masked = masked, seed = seed,
                                 preloaded = preloaded)
         z = latent_coords(model, d.X)
-        push!(panels, latent_scatter(z, z_dim, "R$s — by pigeon";
-                                     zcolor = d.pid, c = :viridis,
-                                     colorbar_title = "pigeon", legend = false))
         push!(panels, latent_scatter(z, z_dim, "R$s — by run";
                                      group = ["run $r" for r in d.run],
                                      palette = runpal, legend = :outertopright))
     end
-    plt = plot(panels...; layout = (N_SITE, 2), size = (1200, 1400),
+    plt = plot(panels...; layout = (1, N_SITE), size = (1400, 700),
                plot_title = "Within-site latent clustering (each site its own VAE)")
     display(plt)
     return plt
