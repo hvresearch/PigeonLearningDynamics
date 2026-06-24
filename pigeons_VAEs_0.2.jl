@@ -175,7 +175,7 @@ const N_RUN    = 6   # homing runs 01..06
 
 # Reads every CSV into the 3x26x6 lat/long arrays (the all_trajs structure).
 # Each lats[i,j,k] / longs[i,j,k] is the vector of points for one homing run.
-function load_pigeon_trajectories(; data_root::AbstractString = "../data")
+function load_pigeon_trajectories(; data_root::AbstractString = "data")
     file_paths = ["$(data_root)/R$(i)/$(PIGEON_LIST[j])/$(PIGEON_LIST[j])_R$(i)_0$(k).csv"
                   for i in 1:N_SITE, j in 1:N_PIGEON, k in 1:N_RUN]
     raw_data = [DataFrame(CSV.File(file_paths[i, j, k]))
@@ -219,13 +219,15 @@ end
 #   normalization = :minmax  ->  a = min,  b = max - min   (targets in [0,1]; use sigmoid output)
 #   normalization = :zscore  ->  a = mean, b = std         (mean 0 / std 1; use identity output)
 # De-normalize anywhere with  x = xnorm * b + a.
-function build_dataset(lats, longs; align::Symbol = :center, normalization::Symbol = :minmax)
-    idx = CartesianIndices((N_SITE, N_PIGEON, N_RUN))
-    L   = maximum(length(lats[I]) for I in idx)                      # max trajectory length
+function build_dataset(lats, longs; align::Symbol = :center, normalization::Symbol = :minmax,
+                       sites = 1:N_SITE)
+    site_ids = collect(sites)
+    triples  = [(i, j, k) for i in site_ids for j in 1:N_PIGEON for k in 1:N_RUN]  # k fastest
+    L = maximum(length(lats[i, j, k]) for (i, j, k) in triples)      # max trajectory length
 
-    # Flatten every coordinate once, to compute the shared constants.
-    all_lat = reduce(vcat, (collect(lats[I])  for I in idx))
-    all_lon = reduce(vcat, (collect(longs[I]) for I in idx))
+    # Flatten every included coordinate once, to compute the shared constants.
+    all_lat = reduce(vcat, (collect(lats[i, j, k])  for (i, j, k) in triples))
+    all_lon = reduce(vcat, (collect(longs[i, j, k]) for (i, j, k) in triples))
 
     if normalization === :minmax
         lat_a, lat_b = minimum(all_lat), maximum(all_lat) - minimum(all_lat)
@@ -238,18 +240,16 @@ function build_dataset(lats, longs; align::Symbol = :center, normalization::Symb
     end
     lat_b = lat_b == 0 ? 1.0 : lat_b
     lon_b = lon_b == 0 ? 1.0 : lon_b
-    @info "Shared global normalization (same function for every trajectory)" normalization lat_a lat_b lon_a lon_b
+    @info "Shared global normalization (same function for every trajectory in this run)" sites = site_ids normalization lat_a lat_b lon_a lon_b
 
-    N = N_SITE * N_PIGEON * N_RUN                                    # 468 trajectories
+    N = length(triples)
     X    = Array{Float32}(undef, 2L, N)
     mask = Array{Float32}(undef, 2L, N)                              # 1 = real point, 0 = padding
     site = Vector{Int}(undef, N)
     pid  = Vector{Int}(undef, N)
     run  = Vector{Int}(undef, N)
 
-    col = 0
-    for i in 1:N_SITE, j in 1:N_PIGEON, k in 1:N_RUN
-        col += 1
+    for (col, (i, j, k)) in enumerate(triples)
         T = length(lats[i, j, k])
         pre, post = pad_counts(T, L, align)
         plat = pad_series(lats[i, j, k],  L; align = align)
@@ -264,7 +264,7 @@ function build_dataset(lats, longs; align::Symbol = :center, normalization::Symb
         run[col]   = k
     end
 
-    meta = (; L, normalization, lat_a, lat_b, lon_a, lon_b, mask)
+    meta = (; L, normalization, lat_a, lat_b, lon_a, lon_b, mask, sites = site_ids)
     return X, site, pid, run, meta
 end
 
@@ -295,11 +295,23 @@ function plot_latent_by_pigeon(model, X, pid)
             title = "Pigeon trajectories in VAE latent space (by pigeon)")
 end
 
+# Same latent space, colored by homing-run number (1..6) — the within-site
+# "learning dynamics" variable: do later runs converge/separate from early ones?
+function plot_latent_by_run(model, X, run)
+    z = latent_coords(model, X)
+    scatter(z[1, :], z[2, :]; group = ["run $r" for r in run], palette = :viridis,
+            markersize = 3, markerstrokewidth = 0, legend = :outertopright,
+            xlabel = "z[0]", ylabel = "z[1]",
+            title = "Pigeon trajectories in VAE latent space (by run)")
+end
+
 # Sanity check: overlay one original trajectory and its VAE reconstruction
 # (both de-normalized back to lat/long).
 function plot_reconstruction(model, X, meta, col::Int)
     L = meta.L
-    x̂ = cpu(decode(model, device(X[:, col])))
+    x = device(X[:, col])
+    μ, _ = encode(model, x)               # encode to the latent space first...
+    x̂ = cpu(decode(model, μ))             # ...then decode the latent MEAN (no sampling noise)
     denlat(v) = v .* meta.lat_b .+ meta.lat_a
     denlon(v) = v .* meta.lon_b .+ meta.lon_a
 
@@ -315,7 +327,7 @@ end
 # ===========================================================================
 # Main experiment
 # ===========================================================================
-function run_pigeons(; data_root::AbstractString = "../data",
+function run_pigeons(; data_root::AbstractString = "data",
                        align::Symbol = :center,
                        normalization::Symbol = :minmax,
                        hidden_dims::Vector{Int} = [256, 128, 64, 32],  # 4 hidden layers
@@ -338,12 +350,70 @@ function run_pigeons(; data_root::AbstractString = "../data",
     return model, (; X, site, pid, run, meta)
 end
 
-# Train one VAE per padding alignment (:pre, :center, :post) on otherwise
+# Fit a VAE on a single release site and return (model, dataset) so the latent
+# space reflects only within-site variation (between pigeons / across runs),
+# not the trivial between-site separation.
+function run_one_site(site_id::Int; data_root::AbstractString = "data",
+                      align::Symbol = :center, normalization::Symbol = :minmax,
+                      hidden_dims::Vector{Int} = [256, 128, 64, 32],
+                      epochs::Int = 200, batchsize::Int = 64,
+                      masked::Bool = false, seed::Int = 0,
+                      preloaded = nothing)
+    lats, longs = preloaded === nothing ?
+        load_pigeon_trajectories(; data_root = data_root) : preloaded
+    X, site, pid, run, meta = build_dataset(lats, longs; align = align,
+                                            normalization = normalization, sites = [site_id])
+    @info "Site R$site_id" trajectories = size(X, 2) max_len = meta.L input_dim = size(X, 1)
+
+    Random.seed!(seed)
+    out   = normalization === :minmax ? sigmoid : identity
+    model = device(VAE(2; input_dim = size(X, 1), hidden_dims = hidden_dims, out = out))
+    opt   = setup(Adam(1f-3), model)
+    if masked
+        train_masked!(model, opt, DataLoader((X, meta.mask); batchsize = batchsize, shuffle = true), epochs)
+    else
+        train!(model, opt, DataLoader((X, pid); batchsize = batchsize, shuffle = true), epochs)
+    end
+    return model, (; X, site, pid, run, meta)
+end
+
+# Run R1, R2, R3 each on their OWN VAE (one model per site, trained only on that
+# site's 156 trajectories). Shows a 3x2 grid: rows = release site, columns =
+# latent space colored by pigeon id and by run number. Each site is trained
+# independently with the same seed so the panels are comparable.
+function run_sites_separately(; data_root::AbstractString = "data",
+                                align::Symbol = :center, normalization::Symbol = :minmax,
+                                hidden_dims::Vector{Int} = [256, 128, 64, 32],
+                                epochs::Int = 200, batchsize::Int = 64,
+                                masked::Bool = false, seed::Int = 0)
+    preloaded = load_pigeon_trajectories(; data_root = data_root)
+    panels = Any[]
+    for s in 1:N_SITE
+        println("=== Release site R$s ===")
+        model, d = run_one_site(s; align = align, normalization = normalization,
+                                hidden_dims = hidden_dims, epochs = epochs,
+                                batchsize = batchsize, masked = masked, seed = seed,
+                                preloaded = preloaded)
+        z = latent_coords(model, d.X)
+        push!(panels, scatter(z[1, :], z[2, :]; zcolor = d.pid, c = :viridis,
+                              markersize = 3, markerstrokewidth = 0, colorbar_title = "pigeon",
+                              legend = false, xlabel = "z[0]", ylabel = "z[1]",
+                              title = "R$s — by pigeon"))
+        push!(panels, scatter(z[1, :], z[2, :]; group = ["run $r" for r in d.run],
+                              palette = :viridis, markersize = 3, markerstrokewidth = 0,
+                              legend = :outertopright, xlabel = "z[0]", ylabel = "z[1]",
+                              title = "R$s — by run"))
+    end
+    plt = plot(panels...; layout = (N_SITE, 2), size = (1200, 1400),
+               plot_title = "Within-site latent clustering (each site its own VAE)")
+    display(plt)
+    return plt
+end
 # identical settings, plus a fourth panel that masks padded positions out of the
 # reconstruction loss. The masked panel is alignment-invariant (padding has zero
 # gradient), so it serves as the control: if the three unmasked panels disagree
 # but the masked one differs from them, the apparent clusters were padding-driven.
-function run_alignment_comparison(; data_root::AbstractString = "../data",
+function run_alignment_comparison(; data_root::AbstractString = "data",
                                     normalization::Symbol = :minmax,
                                     hidden_dims::Vector{Int} = [256, 128, 64, 32],
                                     epochs::Int = 200, batchsize::Int = 64,
@@ -386,8 +456,14 @@ end
 # Entry point. Adjust data_root to wherever the R1/R2/R3 folders live.
 # ---------------------------------------------------------------------------
 if abspath(PROGRAM_FILE) == @__FILE__
-    run_pigeons(; data_root = "../data")
-    # run_alignment_comparison(; data_root = "../data")   # :pre / :center / :post side by side
+    # All sites together (clusters trivially by release site):
+    # run_pigeons(; data_root = "data")
+
+    # Each release site on its own VAE — examine WITHIN-site clustering:
+    run_sites_separately(; data_root = "data")
+
+    # Padding-alignment + masked-loss diagnostic (all sites):
+    # run_alignment_comparison(; data_root = "data")
 end
 
-run_pigeons(; data_root = "data")
+run_sites_separately()
