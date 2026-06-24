@@ -24,7 +24,7 @@
 #     between :minmax (-> [0,1], sigmoid output) and :zscore (mean 0/std 1,
 #     identity output). The output activation follows the choice automatically.
 #   * "4 hidden dimensions" is read as a 4-hidden-layer encoder/decoder,
-#     hidden_dims = [256, 128, 64, 32] (paralleling the earlier VAE3/VAE5).
+#     hidden_dims = [1024, 256, 64, 16] (paralleling the earlier VAE3/VAE5).
 
 using Flux
 using Flux: DataLoader, withgradient, setup, update!
@@ -37,13 +37,22 @@ using Plots
 # Device selection
 # ---------------------------------------------------------------------------
 const HAS_CUDA = try
-    using CUDA, cuDNN
+    using CUDA
+    using cuDNN
     CUDA.functional()
 catch
     false
 end
 device(x) = HAS_CUDA ? gpu(x) : x
 @info "Compute device" gpu = HAS_CUDA
+
+# ---------------------------------------------------------------------------
+# Global settings
+# ---------------------------------------------------------------------------
+# Latent space dimension, used everywhere as the default. Change it here once
+# (e.g. Z_DIM = 3 for a 3-D latent space + 3-D plots). Every runner/plot still
+# accepts a `z_dim` keyword to override per-call if needed.
+Z_DIM = 3
 
 # ---------------------------------------------------------------------------
 # Depth-parametric VAE (unchanged from p786_project_VAEs.jl)
@@ -271,38 +280,46 @@ end
 # ===========================================================================
 # Visualization
 # ===========================================================================
-# Latent means for every trajectory -> (2, N).
+# Latent means for every trajectory -> (z_dim, N).
 function latent_coords(model, X)
     μ, logσ² = encode(model, device(X))
     return cpu(reparameterize(μ, logσ²))
 end
 
-# Scatter the 2-D latent space, colored by release site (the clustering test).
-function plot_latent_by_site(model, X, site)
+# Draw a latent scatter that is 3-D when z_dim >= 3, otherwise 2-D. All color/
+# group/legend options are forwarded through `kwargs...`. We branch on the
+# actual number of latent rows too, so a z_dim of 3 never indexes a missing row.
+function latent_scatter(z, z_dim, title; kwargs...)
+    if z_dim >= 3 && size(z, 1) >= 3
+        scatter(z[1, :], z[2, :], z[3, :]; markersize = 3, markerstrokewidth = 0,
+                xlabel = "z[1]", ylabel = "z[2]", zlabel = "z[3]", title = title, kwargs...)
+    else
+        scatter(z[1, :], z[2, :]; markersize = 3, markerstrokewidth = 0,
+                xlabel = "z[1]", ylabel = "z[2]", title = title, kwargs...)
+    end
+end
+
+# Scatter the latent space, colored by release site (the clustering test).
+function plot_latent_by_site(model, X, site; z_dim::Int = Z_DIM)
     z = latent_coords(model, X)
-    scatter(z[1, :], z[2, :]; group = ["R$s" for s in site],
-            markersize = 3, markerstrokewidth = 0, palette = :tab10,
-            xlabel = "z[0]", ylabel = "z[1]", legend = :outertopright,
-            title = "Pigeon trajectories in VAE latent space (by release site)")
+    latent_scatter(z, z_dim, "Pigeon trajectories in VAE latent space (by release site)";
+                   group = ["R$s" for s in site], palette = :tab10, legend = :outertopright)
 end
 
 # Same latent space, colored by pigeon id (continuous colorbar, 26 pigeons).
-function plot_latent_by_pigeon(model, X, pid)
+function plot_latent_by_pigeon(model, X, pid; z_dim::Int = Z_DIM)
     z = latent_coords(model, X)
-    scatter(z[1, :], z[2, :]; zcolor = pid, c = :viridis, markersize = 3,
-            markerstrokewidth = 0, colorbar_title = "pigeon id",
-            xlabel = "z[0]", ylabel = "z[1]", legend = false,
-            title = "Pigeon trajectories in VAE latent space (by pigeon)")
+    latent_scatter(z, z_dim, "Pigeon trajectories in VAE latent space (by pigeon)";
+                   zcolor = pid, c = :viridis, colorbar_title = "pigeon id", legend = false)
 end
 
 # Same latent space, colored by homing-run number (1..6) — the within-site
 # "learning dynamics" variable: do later runs converge/separate from early ones?
-function plot_latent_by_run(model, X, run)
+function plot_latent_by_run(model, X, run; z_dim::Int = Z_DIM)
     z = latent_coords(model, X)
-    scatter(z[1, :], z[2, :]; group = ["run $r" for r in run], palette = :viridis,
-            markersize = 3, markerstrokewidth = 0, legend = :outertopright,
-            xlabel = "z[0]", ylabel = "z[1]",
-            title = "Pigeon trajectories in VAE latent space (by run)")
+    runpal = palette(:viridis, N_RUN)     # 6 DISTINCT colors sampled from viridis
+    latent_scatter(z, z_dim, "Pigeon trajectories in VAE latent space (by run)";
+                   group = ["run $r" for r in run], palette = runpal, legend = :outertopright)
 end
 
 # Sanity check: overlay one original trajectory and its VAE reconstruction
@@ -328,23 +345,24 @@ end
 # Main experiment
 # ===========================================================================
 function run_pigeons(; data_root::AbstractString = "data",
+                       z_dim::Int = Z_DIM,
                        align::Symbol = :center,
                        normalization::Symbol = :minmax,
-                       hidden_dims::Vector{Int} = [256, 128, 64, 32],  # 4 hidden layers
+                       hidden_dims::Vector{Int} = [1024, 256, 64, 16],  # 4 hidden layers, first = 1024
                        epochs::Int = 200, batchsize::Int = 64)
     lats, longs = load_pigeon_trajectories(; data_root = data_root)
     X, site, pid, run, meta = build_dataset(lats, longs; align = align, normalization = normalization)
     input_dim = size(X, 1)
-    @info "Dataset" trajectories = size(X, 2) max_len = meta.L input_dim = input_dim
+    @info "Dataset" trajectories = size(X, 2) max_len = meta.L input_dim = input_dim z_dim = z_dim
 
     out = normalization === :minmax ? sigmoid : identity   # match the target range
     loader = DataLoader((X, site); batchsize = batchsize, shuffle = true)
-    model  = device(VAE(2; input_dim = input_dim, hidden_dims = hidden_dims, out = out))
+    model  = device(VAE(z_dim; input_dim = input_dim, hidden_dims = hidden_dims, out = out))
     opt    = setup(Adam(1f-3), model)
     train!(model, opt, loader, epochs)
 
-    display(plot_latent_by_site(model, X, site))
-    display(plot_latent_by_pigeon(model, X, pid))
+    display(plot_latent_by_site(model, X, site; z_dim = z_dim))
+    display(plot_latent_by_pigeon(model, X, pid; z_dim = z_dim))
     display(plot_reconstruction(model, X, meta, 1))
 
     return model, (; X, site, pid, run, meta)
@@ -354,8 +372,9 @@ end
 # space reflects only within-site variation (between pigeons / across runs),
 # not the trivial between-site separation.
 function run_one_site(site_id::Int; data_root::AbstractString = "data",
+                      z_dim::Int = Z_DIM,
                       align::Symbol = :center, normalization::Symbol = :minmax,
-                      hidden_dims::Vector{Int} = [256, 128, 64, 32],
+                      hidden_dims::Vector{Int} = [1024, 256, 64, 16],
                       epochs::Int = 200, batchsize::Int = 64,
                       masked::Bool = false, seed::Int = 0,
                       preloaded = nothing)
@@ -363,11 +382,11 @@ function run_one_site(site_id::Int; data_root::AbstractString = "data",
         load_pigeon_trajectories(; data_root = data_root) : preloaded
     X, site, pid, run, meta = build_dataset(lats, longs; align = align,
                                             normalization = normalization, sites = [site_id])
-    @info "Site R$site_id" trajectories = size(X, 2) max_len = meta.L input_dim = size(X, 1)
+    @info "Site R$site_id" trajectories = size(X, 2) max_len = meta.L input_dim = size(X, 1) z_dim = z_dim
 
     Random.seed!(seed)
     out   = normalization === :minmax ? sigmoid : identity
-    model = device(VAE(2; input_dim = size(X, 1), hidden_dims = hidden_dims, out = out))
+    model = device(VAE(z_dim; input_dim = size(X, 1), hidden_dims = hidden_dims, out = out))
     opt   = setup(Adam(1f-3), model)
     if masked
         train_masked!(model, opt, DataLoader((X, meta.mask); batchsize = batchsize, shuffle = true), epochs)
@@ -382,27 +401,27 @@ end
 # latent space colored by pigeon id and by run number. Each site is trained
 # independently with the same seed so the panels are comparable.
 function run_sites_separately(; data_root::AbstractString = "data",
+                                z_dim::Int = Z_DIM,
                                 align::Symbol = :center, normalization::Symbol = :minmax,
-                                hidden_dims::Vector{Int} = [256, 128, 64, 32],
+                                hidden_dims::Vector{Int} = [1024, 256, 64, 16],
                                 epochs::Int = 200, batchsize::Int = 64,
                                 masked::Bool = false, seed::Int = 0)
     preloaded = load_pigeon_trajectories(; data_root = data_root)
+    runpal = palette(:viridis, N_RUN)     # 6 distinct colors, one per run
     panels = Any[]
     for s in 1:N_SITE
         println("=== Release site R$s ===")
-        model, d = run_one_site(s; align = align, normalization = normalization,
+        model, d = run_one_site(s; z_dim = z_dim, align = align, normalization = normalization,
                                 hidden_dims = hidden_dims, epochs = epochs,
                                 batchsize = batchsize, masked = masked, seed = seed,
                                 preloaded = preloaded)
         z = latent_coords(model, d.X)
-        push!(panels, scatter(z[1, :], z[2, :]; zcolor = d.pid, c = :viridis,
-                              markersize = 3, markerstrokewidth = 0, colorbar_title = "pigeon",
-                              legend = false, xlabel = "z[0]", ylabel = "z[1]",
-                              title = "R$s — by pigeon"))
-        push!(panels, scatter(z[1, :], z[2, :]; group = ["run $r" for r in d.run],
-                              palette = :viridis, markersize = 3, markerstrokewidth = 0,
-                              legend = :outertopright, xlabel = "z[0]", ylabel = "z[1]",
-                              title = "R$s — by run"))
+        push!(panels, latent_scatter(z, z_dim, "R$s — by pigeon";
+                                     zcolor = d.pid, c = :viridis,
+                                     colorbar_title = "pigeon", legend = false))
+        push!(panels, latent_scatter(z, z_dim, "R$s — by run";
+                                     group = ["run $r" for r in d.run],
+                                     palette = runpal, legend = :outertopright))
     end
     plt = plot(panels...; layout = (N_SITE, 2), size = (1200, 1400),
                plot_title = "Within-site latent clustering (each site its own VAE)")
@@ -414,23 +433,23 @@ end
 # gradient), so it serves as the control: if the three unmasked panels disagree
 # but the masked one differs from them, the apparent clusters were padding-driven.
 function run_alignment_comparison(; data_root::AbstractString = "data",
+                                    z_dim::Int = Z_DIM,
                                     normalization::Symbol = :minmax,
-                                    hidden_dims::Vector{Int} = [256, 128, 64, 32],
+                                    hidden_dims::Vector{Int} = [1024, 256, 64, 16],
                                     epochs::Int = 200, batchsize::Int = 64,
                                     seed::Int = 0)
     lats, longs = load_pigeon_trajectories(; data_root = data_root)
     out = normalization === :minmax ? sigmoid : identity
 
     site_panel(z, site, ttl) =
-        scatter(z[1, :], z[2, :]; group = ["R$s" for s in site],
-                markersize = 3, markerstrokewidth = 0, palette = :tab10,
-                xlabel = "z[0]", ylabel = "z[1]", legend = :outertopright, title = ttl)
+        latent_scatter(z, z_dim, ttl; group = ["R$s" for s in site],
+                       palette = :tab10, legend = :outertopright)
 
     # Panels 1-3: standard (unmasked) loss under each alignment.
     unmasked = map((:pre, :center, :post)) do align
         Random.seed!(seed)   # same init/shuffle across panels -> fair comparison
         X, site, _, _, _ = build_dataset(lats, longs; align = align, normalization = normalization)
-        model = device(VAE(2; input_dim = size(X, 1), hidden_dims = hidden_dims, out = out))
+        model = device(VAE(z_dim; input_dim = size(X, 1), hidden_dims = hidden_dims, out = out))
         opt   = setup(Adam(1f-3), model)
         println("=== align = :$align (unmasked) ===")
         train!(model, opt, DataLoader((X, site); batchsize = batchsize, shuffle = true), epochs)
@@ -440,7 +459,7 @@ function run_alignment_comparison(; data_root::AbstractString = "data",
     # Panel 4: masked loss. Alignment is irrelevant here, so :center is used.
     Random.seed!(seed)
     Xm, sitem, _, _, metam = build_dataset(lats, longs; align = :center, normalization = normalization)
-    modelm = device(VAE(2; input_dim = size(Xm, 1), hidden_dims = hidden_dims, out = out))
+    modelm = device(VAE(z_dim; input_dim = size(Xm, 1), hidden_dims = hidden_dims, out = out))
     optm   = setup(Adam(1f-3), modelm)
     println("=== masked (alignment-invariant) ===")
     train_masked!(modelm, optm, DataLoader((Xm, metam.mask); batchsize = batchsize, shuffle = true), epochs)
@@ -466,4 +485,4 @@ if abspath(PROGRAM_FILE) == @__FILE__
     # run_alignment_comparison(; data_root = "data")
 end
 
-run_sites_separately()
+run_sites_separately(; data_root = "data")
