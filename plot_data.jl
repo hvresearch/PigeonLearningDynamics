@@ -35,7 +35,7 @@ end
 pigeon_list = ["A_A35","A_A38","A_A45","A_D06","A_D09","A_D16","A_D83","A_D94","A_D96","B_A31","B_A34","B_D04","B_D12","B_D86","B_D90","B_D98","C_A39","C_A43","C_A47","C_D00","C_D01","C_D08","C_D10","C_D15","C_D88","C_D93"]
 
 # ╔═╡ 1e833119-6e60-41d1-b21a-11ec65f12733
-file_paths = ["data/R$(i)/$(pigeon_list[j])/$(pigeon_list[j])_R$(i)_0$(k).csv" for i in 1:3, j in 1:26, k in 1:6]
+file_paths = ["../data/R$(i)/$(pigeon_list[j])/$(pigeon_list[j])_R$(i)_0$(k).csv" for i in 1:3, j in 1:26, k in 1:6]
 
 # ╔═╡ ead42db4-7fad-47af-bc31-e596cf309804
 raw_data = [DataFrame(CSV.File(file_paths[i,j,k])) for i in 1:3, j in 1:26, k in 1:6]
