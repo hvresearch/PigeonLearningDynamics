@@ -37,7 +37,7 @@ using Plots
 # Device selection
 # ---------------------------------------------------------------------------
 const HAS_CUDA = try
-    using CUDA
+    using CUDA, cuDNN
     CUDA.functional()
 catch
     false
@@ -389,3 +389,5 @@ if abspath(PROGRAM_FILE) == @__FILE__
     run_pigeons(; data_root = "../data")
     # run_alignment_comparison(; data_root = "../data")   # :pre / :center / :post side by side
 end
+
+run_pigeons(; data_root = "data")

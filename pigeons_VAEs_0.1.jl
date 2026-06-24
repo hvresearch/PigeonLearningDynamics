@@ -35,13 +35,12 @@ using Random
 using Statistics
 using Colors
 using Plots
-using CUDA, cuDNN
 
 # ---------------------------------------------------------------------------
 # Device selection (Cells 0/1)
 # ---------------------------------------------------------------------------
 const HAS_CUDA = try
-    using CUDA
+    using CUDA, cuDNN
     CUDA.functional()
 catch
     false
