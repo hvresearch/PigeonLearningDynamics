@@ -166,45 +166,27 @@ function combine_group(group)
     return lats, lons
 end
 
-function build_trajectory_traces(trajectories; group_size=26)
+function build_trajectory_traces(trajectories; group_size=26, group_names=nothing)
     n_groups = cld(length(trajectories), group_size)
-    # n_groups = size(trajectories,3)
     traces = Vector{GenericTrace}(undef, n_groups)
     for g in 1:n_groups
         lo, hi = (g - 1) * group_size + 1, min(g * group_size, length(trajectories))
         glats, glons = combine_group(trajectories[lo:hi])
+        name = group_names !== nothing ? group_names[g] : "Group $g"
+        color = palette_colors[mod(g-1, length(palette_colors))+1]
         traces[g] = scattermapbox(
             lat=glats, lon=glons, mode="lines",
-            # line=attr(width=1.5, color=palette_color(g)),
-            line=attr(width=1.5, color=palette_colors[mod(g-1,length(palette_colors))+1]),
-            hoverinfo="none", showlegend=false,
+            line=attr(width=1.5, color=color),
+            name=name, legendgroup=name,
+            showlegend=true, hoverinfo="none",
         )
     end
     return traces
 end
 
-#---example trajectories plot---#
-trajectory_traces = build_trajectory_traces(trajectories[1,:,:]; group_size=26)
-
-layout = Layout(
-    mapbox=attr(
-        style="white-bg",
-        center=attr(
-            lat=mean([bbox.south, bbox.north]),
-            lon=mean([bbox.west,  bbox.east]),
-        ),
-        zoom=13,
-    ),
-    showlegend=false,
-    margin=attr(l=0, r=0, t=0, b=0),
-    height=650,
-)
-
-display(PlotlyJS.plot([road_trace, hedge_trace, tree_trace, trajectory_traces...], layout))
-
 #---plot trajectories---#
 
-function plot_trajectory_traces(trajectories; group_size=26)
+function plot_trajectory_traces(trajectories; group_size=26, save_html=nothing)
     trajectory_traces = build_trajectory_traces(trajectories; group_size=26)
     layout = Layout(
         mapbox=attr(
@@ -215,13 +197,15 @@ function plot_trajectory_traces(trajectories; group_size=26)
             ),
             zoom=13,
         ),
-        showlegend=false,
+        showlegend=true,
         margin=attr(l=0, r=0, t=0, b=0),
-        height=800,width=1200
+        height=800, width=1200,
     )
-    display(PlotlyJS.plot([road_trace, hedge_trace, tree_trace, trajectory_traces...], layout))
+    p = PlotlyJS.plot([road_trace, hedge_trace, tree_trace, trajectory_traces...], layout)
+    save_html !== nothing && PlotlyJS.savefig(p, save_html)
+    display(p)
 end
 
 trajectories_s = sample_trajectories(trajectories; sampling=10)
 
-plot_trajectory_traces(trajectories_s[1,:,1:3]; group_size=26)
+plot_trajectory_traces(trajectories_s[1,:,1:6]; group_size=26)
