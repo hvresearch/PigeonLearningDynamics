@@ -66,8 +66,8 @@ HTML = r"""<!DOCTYPE html>
   <div id="side">
     <h1>Pigeon vision × altitude</h1>
     <div class="sub">Recognition radius = min(geometric horizon, visual-acuity range).
-      Gray histogram = real 2011 flight altitude, <b>true height above ground</b>
-      (GPS sea-level altitude minus a Terrarium DEM).</div>
+      Gray histogram = real 2011 <b>in-flight</b> altitude (speed &gt;15 km/h),
+      <b>true height above ground</b> (GPS sea-level altitude minus a Terrarium DEM).</div>
     <div class="ctl"><label>Landmark size <b><span id="lLab">100</span> m</b></label>
       <input type="range" id="L" min="5" max="1000" step="5" value="100"></div>
     <div class="ctl"><label>Visual acuity <b><span id="aLab">12</span> cyc/deg</b></label>

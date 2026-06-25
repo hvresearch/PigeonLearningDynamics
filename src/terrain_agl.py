@@ -82,11 +82,16 @@ def sample_dem(elev, z, px0, py0, lon, lat):
     return (e00*(1-fx)*(1-fy) + e10*fx*(1-fy) + e01*(1-fx)*fy + e11*fx*fy)
 
 
+FLY_KMH = 15.0  # speed gate: below this the bird is grounded/perched, not flying.
+                # The 1 Hz logger records lots of pre-release & post-landing time
+                # (~63% of fixes) at ~0 m AGL, which otherwise swamps the distribution.
+
+
 def main():
     elev, z, px0, py0 = build_dem()
     edges = np.arange(-40, 405, 5.0)
     counts = np.zeros(len(edges)-1)
-    asl_med, agl_med, n_tot = [], [], 0
+    asl_med, agl_med, n_tot, n_fly = [], [], 0, 0
     terr_at_release = []
     for csv in Path("data").glob("R*/*/*.csv"):
         try:
@@ -95,28 +100,34 @@ def main():
             la = pd.to_numeric(df["Latitude"], errors="coerce")
             lo = pd.to_numeric(df["Longitude"], errors="coerce")
             al = pd.to_numeric(df["Altitude"], errors="coerce")
-            m = la.between(45,60) & lo.between(-10,5) & al.between(-50,2000)
-            la, lo, al = la[m].to_numpy(), lo[m].to_numpy(), al[m].to_numpy()
+            sp = pd.to_numeric(df["Speed"], errors="coerce")
+            m = la.between(45,60) & lo.between(-10,5) & al.between(-50,2000) & sp.notna()
+            la, lo, al, sp = la[m].to_numpy(), lo[m].to_numpy(), al[m].to_numpy(), sp[m].to_numpy()
         except Exception:
             continue
         if len(la) < 2:
             continue
         terr = sample_dem(elev, z, px0, py0, lo, la)
         agl = al - terr
-        counts += np.histogram(agl, bins=edges)[0]
-        n_tot += len(agl)
-        asl_med.append(np.median(al)); agl_med.append(np.median(agl))
         terr_at_release.append(terr[0])
+        n_tot += len(agl)
+        fly = sp > FLY_KMH                      # in-flight fixes only
+        if fly.sum() < 2:
+            continue
+        counts += np.histogram(agl[fly], bins=edges)[0]
+        n_fly += int(fly.sum())
+        asl_med.append(np.median(al[fly])); agl_med.append(np.median(agl[fly]))
     centers = ((edges[:-1] + edges[1:]) / 2).tolist()
     Path("agl_hist.json").write_text(json.dumps(
         {"centers": [round(c,1) for c in centers], "counts": counts.tolist()},
         separators=(",", ":")))
     aglmed = np.array(agl_med)
-    print(f"\nfixes: {n_tot:,}")
+    print(f"\nfixes total: {n_tot:,}   flying (>{FLY_KMH:.0f} km/h): {n_fly:,} "
+          f"({100*n_fly/n_tot:.0f}%)")
     print(f"terrain at release sites: {np.nanmedian(terr_at_release):.0f} m ASL "
           f"({np.nanmin(terr_at_release):.0f}..{np.nanmax(terr_at_release):.0f})")
-    print(f"per-flight median ASL altitude:  {np.median(asl_med):.0f} m")
-    print(f"per-flight median AGL altitude:  {np.median(aglmed):.0f} m "
+    print(f"per-flight median ASL altitude (flying):  {np.median(asl_med):.0f} m")
+    print(f"per-flight median AGL altitude (flying):  {np.median(aglmed):.0f} m "
           f"(IQR {np.percentile(aglmed,25):.0f}-{np.percentile(aglmed,75):.0f})")
     # AGL percentiles from histogram
     cc = np.cumsum(counts) / counts.sum()
