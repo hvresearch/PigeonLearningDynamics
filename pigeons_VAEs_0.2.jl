@@ -47,20 +47,6 @@ device(x) = HAS_CUDA ? gpu(x) : x
 @info "Compute device" gpu = HAS_CUDA
 
 # ---------------------------------------------------------------------------
-# Global settings
-# ---------------------------------------------------------------------------
-# Latent space dimension, used everywhere as the default. Change it here once
-# (e.g. Z_DIM = 3 for a 3-D latent space + 3-D plots). Every runner/plot still
-# accepts a `z_dim` keyword to override per-call if needed.
-Z_DIM = 3
-
-# Temporal downsampling: keep every DOWNSAMPLE-th point of each trajectory before
-# feeding it to the VAE. 1 = no downsampling. Larger values shrink the input
-# dimension (input_dim = 2L) proportionally, which makes the big first Dense
-# layer and GPU memory far more manageable.
-DOWNSAMPLE = 10
-
-# ---------------------------------------------------------------------------
 # Depth-parametric VAE (unchanged from p786_project_VAEs.jl)
 # ---------------------------------------------------------------------------
 struct VAE{E, M, L, D}
@@ -402,6 +388,7 @@ function run_one_site(site_id::Int; data_root::AbstractString = "data",
     else
         train!(model, opt, DataLoader((X, pid); batchsize = batchsize, shuffle = true), epochs)
     end
+    display(plot_reconstruction(model, X, meta, 1))
     
     return model, (; X, site, pid, run, meta)
 end
@@ -413,7 +400,7 @@ end
 function run_sites_separately(; data_root::AbstractString = "data",
                                 z_dim::Int = Z_DIM,
                                 align::Symbol = :center, normalization::Symbol = :minmax,
-                                hidden_dims::Vector{Int} = [256, 128, 32],
+                                hidden_dims::Vector{Int} = [1024,256, 128, 32],
                                 epochs::Int = 200, batchsize::Int = 64,
                                 masked::Bool = false, seed::Int = 0)
     preloaded = load_pigeon_trajectories(; data_root = data_root)
@@ -442,7 +429,7 @@ end
 function run_alignment_comparison(; data_root::AbstractString = "data",
                                     z_dim::Int = Z_DIM,
                                     normalization::Symbol = :minmax,
-                                    hidden_dims::Vector{Int} = [1024, 256, 64, 16],
+                                    hidden_dims::Vector{Int} = [1024, 256, 128, 32],
                                     epochs::Int = 200, batchsize::Int = 64,
                                     seed::Int = 0)
     lats, longs = load_pigeon_trajectories(; data_root = data_root)
@@ -489,7 +476,21 @@ if abspath(PROGRAM_FILE) == @__FILE__
     run_sites_separately(; data_root = "data")
 
     # Padding-alignment + masked-loss diagnostic (all sites):
-    # run_alignment_comparison(; data_root = "data")
 end
 
+# ---------------------------------------------------------------------------
+# Global settings
+# ---------------------------------------------------------------------------
+# Latent space dimension, used everywhere as the default. Change it here once
+# (e.g. Z_DIM = 3 for a 3-D latent space + 3-D plots). Every runner/plot still
+# accepts a `z_dim` keyword to override per-call if needed.
+Z_DIM = 2
+
+# Temporal downsampling: keep every DOWNSAMPLE-th point of each trajectory before
+# feeding it to the VAE. 1 = no downsampling. Larger values shrink the input
+# dimension (input_dim = 2L) proportionally, which makes the big first Dense
+# layer and GPU memory far more manageable.
+DOWNSAMPLE = 5
+
 run_sites_separately(; data_root = "data")
+run_alignment_comparison(; data_root = "data")
