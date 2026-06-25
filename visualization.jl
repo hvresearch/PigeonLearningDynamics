@@ -147,6 +147,15 @@ const PALETTE = [
     "#911eb4", "#46f0f0", "#f032e6", "#bcf60c", "#fabebe",
 ]
 palette_color(i) = PALETTE[mod1(i, length(PALETTE))]
+palette_colors = Plots.palette(:thermal,6)
+
+function sample_trajectories(trajectories; sampling=10)
+    sampled_trajectories = [ 
+        (trajectories[i,j,k][1][1:sampling:end],trajectories[i,j,k][2][1:sampling:end])
+        for i in axes(trajectories,1), j in axes(trajectories,2), k in axes(trajectories,3)
+    ]
+    return sampled_trajectories
+end
 
 function combine_group(group)
     lats, lons = Union{Float64,Missing}[], Union{Float64,Missing}[]
@@ -166,7 +175,8 @@ function build_trajectory_traces(trajectories; group_size=26)
         glats, glons = combine_group(trajectories[lo:hi])
         traces[g] = scattermapbox(
             lat=glats, lon=glons, mode="lines",
-            line=attr(width=1.5, color=palette_color(g)),
+            # line=attr(width=1.5, color=palette_color(g)),
+            line=attr(width=1.5, color=palette_colors[mod(g-1,length(palette_colors))+1]),
             hoverinfo="none", showlegend=false,
         )
     end
@@ -207,9 +217,11 @@ function plot_trajectory_traces(trajectories; group_size=26)
         ),
         showlegend=false,
         margin=attr(l=0, r=0, t=0, b=0),
-        height=650,
+        height=800,width=1200
     )
     display(PlotlyJS.plot([road_trace, hedge_trace, tree_trace, trajectory_traces...], layout))
 end
 
-plot_trajectory_traces(trajectories[1,:,1]; group_size=26)
+trajectories_s = sample_trajectories(trajectories; sampling=10)
+
+plot_trajectory_traces(trajectories_s[1,:,1:3]; group_size=26)
