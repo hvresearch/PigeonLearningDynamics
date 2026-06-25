@@ -208,4 +208,4 @@ end
 
 trajectories_s = sample_trajectories(trajectories; sampling=10)
 
-plot_trajectory_traces(trajectories_s[1,:,1:6]; group_size=26)
+plot_trajectory_traces(trajectories_s[3,:,1:6]; group_size=26, save_html="PigeonLearningDynamics/vis-R3-ts_10.html")
