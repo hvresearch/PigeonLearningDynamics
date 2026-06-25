@@ -17,17 +17,18 @@ longs  = [raw_data[i,j,k]." Longitude" for i in 1:3, j in 1:26, k in 1:6]
 alts   = [raw_data[i,j,k]." Altitude"  for i in 1:3, j in 1:26, k in 1:6]
 speed  = [raw_data[i,j,k]." Speed"     for i in 1:3, j in 1:26, k in 1:6]
 
-all_trajs = plot(title="all_trajectories", legend=false)
+all_trajs = Plots.plot(title="all_trajectories", legend=false)
 for i in 1:3, j in 1:26, k in 1:6
-    plot!(all_trajs, longs[i,j,k], lats[i,j,k])
+    Plots.plot!(all_trajs, longs[i,j,k], lats[i,j,k])
 end
 display(all_trajs)
 
+lats[1,1,1]
+longs[1,1,1]
+
 # --- Your trajectory data (replace with your real trajectories) ---
 trajectories = [
-    ([34.0522, 34.0600, 34.0700], [-118.2437, -118.2500, -118.2600]),
-    ([34.0480, 34.0550, 34.0620], [-118.2300, -118.2400, -118.2480]),
-    ([34.0600, 34.0650, 34.0690], [-118.2550, -118.2600, -118.2640]),
+    (lats[i,j,k], longs[i,j,k]) for i in 1:3, j in 1:26, k in 1:6
 ]
 
 function trajectories_bbox(trajectories; pad=0.01)
@@ -40,9 +41,16 @@ end
 
 bbox = trajectories_bbox(trajectories)
 
-function fetch_osm_features(bbox)
+const OVERPASS_MIRRORS = [
+    "https://overpass-api.de/api/interpreter",
+    "https://overpass.kumi.systems/api/interpreter",
+    "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
+]
+const OSM_CACHE_FILE = joinpath(@__DIR__, "osm_cache.json")
+
+function fetch_osm_features(bbox; max_retries=3, base_delay=10.0)
     query = """
-    [out:json][timeout:60];
+    [out:json][timeout:90];
     (
       way["highway"]($(bbox.south),$(bbox.west),$(bbox.north),$(bbox.east));
       way["barrier"="hedge"]($(bbox.south),$(bbox.west),$(bbox.north),$(bbox.east));
@@ -50,15 +58,36 @@ function fetch_osm_features(bbox)
     );
     out geom;
     """
-    resp = HTTP.post(
-        "https://overpass-api.de/api/interpreter",
-        ["Content-Type" => "text/plain"],
-        query,
-    )
-    return JSON3.read(String(resp.body))
+    for (mi, url) in enumerate(OVERPASS_MIRRORS)
+        for attempt in 1:max_retries
+            try
+                @info "Overpass request" mirror=mi attempt=attempt
+                resp = HTTP.post(url, ["Content-Type" => "text/plain"], query;
+                                 readtimeout=120, connect_timeout=30)
+                data = JSON3.read(String(resp.body))
+                open(OSM_CACHE_FILE, "w") do io; JSON3.write(io, data); end
+                return data
+            catch e
+                is_transient = e isa HTTP.Exceptions.StatusError && e.status in (429, 502, 503, 504)
+                is_transient || (mi == length(OVERPASS_MIRRORS) && attempt == max_retries) || rethrow()
+                delay = base_delay * 2.0^(attempt - 1)
+                @warn "Overpass failed, retrying" mirror=mi attempt=attempt delay=delay error=e
+                sleep(delay)
+            end
+        end
+    end
+    error("All Overpass mirrors failed after retries")
 end
 
-osm_data = fetch_osm_features(bbox)
+function load_osm_features(bbox)
+    if isfile(OSM_CACHE_FILE)
+        @info "Loading OSM data from cache" file=OSM_CACHE_FILE
+        return JSON3.read(read(OSM_CACHE_FILE, String))
+    end
+    return fetch_osm_features(bbox)
+end
+
+osm_data = load_osm_features(bbox)
 
 function classify_features(osm_data)
     roads, hedges, treelines = Any[], Any[], Any[]
@@ -128,8 +157,9 @@ function combine_group(group)
     return lats, lons
 end
 
-function build_trajectory_traces(trajectories; group_size=20)
+function build_trajectory_traces(trajectories; group_size=26)
     n_groups = cld(length(trajectories), group_size)
+    # n_groups = size(trajectories,3)
     traces = Vector{GenericTrace}(undef, n_groups)
     for g in 1:n_groups
         lo, hi = (g - 1) * group_size + 1, min(g * group_size, length(trajectories))
@@ -143,7 +173,8 @@ function build_trajectory_traces(trajectories; group_size=20)
     return traces
 end
 
-trajectory_traces = build_trajectory_traces(trajectories; group_size=20)
+#---example trajectories plot---#
+trajectory_traces = build_trajectory_traces(trajectories[1,:,:]; group_size=26)
 
 layout = Layout(
     mapbox=attr(
@@ -159,4 +190,26 @@ layout = Layout(
     height=650,
 )
 
-display(plot([road_trace, hedge_trace, tree_trace, trajectory_traces...], layout))
+display(PlotlyJS.plot([road_trace, hedge_trace, tree_trace, trajectory_traces...], layout))
+
+#---plot trajectories---#
+
+function plot_trajectory_traces(trajectories; group_size=26)
+    trajectory_traces = build_trajectory_traces(trajectories; group_size=26)
+    layout = Layout(
+        mapbox=attr(
+            style="white-bg",
+            center=attr(
+                lat=mean([bbox.south, bbox.north]),
+                lon=mean([bbox.west,  bbox.east]),
+            ),
+            zoom=13,
+        ),
+        showlegend=false,
+        margin=attr(l=0, r=0, t=0, b=0),
+        height=650,
+    )
+    display(PlotlyJS.plot([road_trace, hedge_trace, tree_trace, trajectory_traces...], layout))
+end
+
+plot_trajectory_traces(trajectories[1,:,1]; group_size=26)
