@@ -39,20 +39,25 @@ def _rdp_mask(xy, eps):
     return keep
 
 
-def simplify(coords, eps_m=4.0, cap=2000, round_to=5):
-    """coords: list of [lat, lon]. Returns simplified list of [lat, lon].
-
-    eps_m : RDP tolerance in meters (smaller = more detail/points).
-    cap   : hard safety ceiling on kept points (uniform stride if exceeded).
-    """
-    if len(coords) <= 2:
-        return [[round(la, round_to), round(lo, round_to)] for la, lo in coords]
+def keep_indices(coords, eps_m=4.0, cap=2000):
+    """coords: list/array of [lat, lon]. Returns indices of points to KEEP
+    after RDP simplification (in meters), capped by uniform stride."""
     arr = np.asarray(coords, dtype=float)
+    if len(arr) <= 2:
+        return list(range(len(arr)))
     lat0 = float(arr[:, 0].mean())
     mlon = _M_PER_DEG_LAT * np.cos(np.radians(lat0))
     xy = np.column_stack([arr[:, 1] * mlon, arr[:, 0] * _M_PER_DEG_LAT])
-    keep = _rdp_mask(xy, eps_m)
-    out = arr[keep]
-    if len(out) > cap:
-        out = out[:: (len(out) // cap + 1)]
-    return [[round(la, round_to), round(lo, round_to)] for la, lo in out]
+    idx = np.flatnonzero(_rdp_mask(xy, eps_m))
+    if len(idx) > cap:
+        idx = idx[:: (len(idx) // cap + 1)]
+    return idx.tolist()
+
+
+def simplify(coords, eps_m=4.0, cap=2000, round_to=5):
+    """coords: list of [lat, lon]. Returns simplified list of [lat, lon]."""
+    if len(coords) <= 2:
+        return [[round(la, round_to), round(lo, round_to)] for la, lo in coords]
+    arr = np.asarray(coords, dtype=float)
+    idx = keep_indices(arr, eps_m, cap)
+    return [[round(arr[i, 0], round_to), round(arr[i, 1], round_to)] for i in idx]

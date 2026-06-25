@@ -106,7 +106,7 @@ def main():
                'solid = first flight<br>dashed = last flight</div>')
     fmap.get_root().html.add_child(folium.Element(legend))
 
-    out = "first_flights_map.html"
+    out = "viewers/first_flights_map.html"
     fmap.save(out)
     print(f"Saved {out}; counts: {counts}")
 

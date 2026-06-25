@@ -11,17 +11,26 @@ Inputs : data/R*/*/*.csv, flight_weather.csv, cloud_grid.json, data_2021.json
 Output : bird_route_development.html  (self-contained; Leaflet from CDN)
 """
 
+import datetime as dt
 import json
 from pathlib import Path
 
 import pandas as pd
 
 from geo_simplify import simplify
+from sun_calc import sun_position
 
 DATA = Path("data")
 EPS_M = 4.0    # RDP tolerance in meters (smaller = more detail)
 CAP = 1500     # safety ceiling on points per flight
 COMPASS = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"]
+
+# Geomagnetic field at the Oxford release site (IGRF, ppigrf), per dataset epoch.
+# declination (deg E of true N), inclination (deg below horizontal), F (uT).
+GEOMAG = {
+    "2011": {"dec": -1.97, "inc": 66.73, "F": 48.7},   # epoch 2011.4
+    "2021": {"dec": -1.09, "inc": 66.71, "F": 48.8},   # epoch 2016.4 (collection)
+}
 
 
 def load_track(csv_path):
@@ -42,12 +51,19 @@ def load_weather():
     df = pd.read_csv("flight_weather.csv")
     for _, r in df.iterrows():
         deg = float(r["wind_direction_10m"])
+        t = str(r["start_time"])
+        hh, mm, ss = (int(x) for x in t.split(":"))
+        y, mo, d = (int(x) for x in str(r["date"]).split("-"))
+        # local Europe/London is BST (UTC+1) in May-Jun -> UTC = local - 1h
+        utc = dt.datetime(y, mo, d, hh, mm, ss) - dt.timedelta(hours=1)
+        az, el = sun_position(float(r["rel_lat"]), float(r["rel_lon"]), utc)
         wx[(r["route"], r["bird"], int(r["flight"]))] = {
-            "date": str(r["date"]), "hour": int(str(r["start_time"])[:2]),
+            "date": str(r["date"]), "hour": hh,
             "cloud": round(float(r["cloud_cover"])),
             "wind": round(float(r["wind_speed_10m"])),
             "wcomp": COMPASS[int((deg + 22.5) // 45) % 8],
             "temp": round(float(r["temperature_2m"]), 1),
+            "sunAz": az, "sunEl": el,
         }
     return wx
 
@@ -73,6 +89,7 @@ def build_2011():
         "key": "2011", "label": "2011 · Flack (routes)",
         "groupLabel": "Release site", "groups": ["R1", "R2", "R3"],
         "hasWeather": True, "maxRel": maxrel, "units": units,
+        "geomag": GEOMAG["2011"],
     }
 
 
@@ -87,6 +104,7 @@ def build_2021():
         "key": "2021", "label": "2021 · Valentini (solo/pair/gen)",
         "groupLabel": "Condition", "groups": d["groups"],
         "hasWeather": False, "maxRel": maxrel, "units": d["units"],
+        "geomag": GEOMAG["2021"],
     }
 
 
@@ -109,7 +127,7 @@ def main():
     html = (HTML_TEMPLATE
             .replace("__DATASETS__", json.dumps(datasets, separators=(",", ":")))
             .replace("__CLOUD__", cloud))
-    out = "bird_route_development.html"
+    out = "viewers/bird_route_development.html"
     Path(out).write_text(html)
     print(f"Saved {out} ({Path(out).stat().st_size/1e6:.1f} MB)")
 
@@ -126,6 +144,8 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 <style>
   html,body{margin:0;height:100%;font-family:system-ui,sans-serif}
   #map{position:absolute;top:0;bottom:0;left:0;right:0}
+  #sunShade{position:absolute;top:0;bottom:0;left:0;right:0;z-index:450;
+    pointer-events:none;display:none}
   #panel{position:absolute;top:12px;left:12px;z-index:1000;background:#fff;
     padding:12px 14px;border-radius:8px;box-shadow:0 1px 6px rgba(0,0,0,.3);
     width:308px;max-height:calc(100% - 30px);overflow:auto}
@@ -165,6 +185,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 </head>
 <body>
 <div id="map"></div>
+<div id="sunShade"></div>
 <div id="panel">
   <h3>Pigeon route development</h3>
   <div class="sub" id="dsSub"></div>
@@ -187,6 +208,11 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     <table class="rel" id="relTbl"></table>
     <label class="toggle" id="cloudTogWrap"><input type="checkbox" id="cloudTog">
       Show cloud cover (selected release)</label>
+    <label class="toggle" id="sunTogWrap"><input type="checkbox" id="sunTog">
+      Sun direction (selected release)</label>
+    <label class="toggle"><input type="checkbox" id="geoTog">
+      Geomagnetic field (compass cue)</label>
+    <div id="navInfo" style="font-size:11px;color:#555;margin:2px 0 8px"></div>
     <div class="legend">
       <div>Release order</div><div class="bar"></div>
       <div class="barlbl"><span>first</span><span>last</span></div>
@@ -261,6 +287,63 @@ function wxLine(f){
   if(f.cloud===undefined) return '';
   return '&#9729;'+f.cloud+'% &middot; '+f.wind+'km/h '+f.wcomp+' &middot; '+f.temp+'&deg;C';
 }
+
+// ---------- navigation cues: sun + geomagnetic field ----------
+let navLayer = L.layerGroup().addTo(map);
+function destLatLng(lat, lon, bearingDeg, distM){
+  const br = bearingDeg*Math.PI/180;
+  const dLat = distM*Math.cos(br)/111320;
+  const dLon = distM*Math.sin(br)/(111320*Math.cos(lat*Math.PI/180));
+  return [lat+dLat, lon+dLon];
+}
+function arrow(a, bearing, distM, color, weight){
+  const b = destLatLng(a[0], a[1], bearing, distM);
+  const h = distM*0.22;
+  [[a,b],
+   [b, destLatLng(b[0],b[1],bearing+150,h)],
+   [b, destLatLng(b[0],b[1],bearing-150,h)]
+  ].forEach(s => L.polyline(s,{color,weight:weight||3,opacity:0.9}).addTo(navLayer));
+  return b;
+}
+const COMPASS8=['N','NE','E','SE','S','SW','W','NW'];
+function compass(az){ return COMPASS8[Math.round(az/45)%8]; }
+
+function drawNav(){
+  navLayer.clearLayers();
+  const shade=document.getElementById('sunShade'); shade.style.display='none';
+  if(mode!=='bird'){ document.getElementById('navInfo').innerHTML=''; return; }
+  const ds=DS(), bnds=map.getBounds();
+  const spanM=(bnds.getNorth()-bnds.getSouth())*111320;
+  const info=[];
+  // geomagnetic field — uniform grid of arrows to magnetic north
+  if(document.getElementById('geoTog').checked && ds.geomag){
+    const g=ds.geomag, n=4;
+    const dLat=(bnds.getNorth()-bnds.getSouth())/(n+1);
+    const dLon=(bnds.getEast()-bnds.getWest())/(n+1);
+    for(let i=1;i<=n;i++) for(let j=1;j<=n;j++){
+      arrow([bnds.getSouth()+dLat*i, bnds.getWest()+dLon*j], g.dec, spanM/(n+2),
+            '#c0392b', 2);
+    }
+    info.push('<span style="color:#c0392b">&#9650;</span> Magnetic N: dec '+
+      g.dec+'°, inc '+g.inc+'°, '+g.F+' µT');
+  }
+  // sun — arrow toward the sun + directional shade
+  const u=ds.units[idx], f=u?u.flights[selRel]:null;
+  if(document.getElementById('sunTog').checked && f && f.sunEl!==undefined){
+    if(f.sunEl>0){
+      const tip=arrow(f.coords[0], f.sunAz, spanM*0.18, '#e67e22', 4);
+      L.circleMarker(tip,{radius:6,color:'#e67e22',fillColor:'#ffd24d',
+        fillOpacity:1,weight:1}).bindTooltip('☀ az '+f.sunAz+'°, el '+
+        f.sunEl+'°',{sticky:true}).addTo(navLayer);
+      shade.style.display='block';
+      shade.style.background='linear-gradient('+f.sunAz+'deg,'+
+        'rgba(15,20,45,0.22), rgba(255,210,120,0.22))';
+      info.push('☀ Sun: '+compass(f.sunAz)+' (az '+f.sunAz+'°), elev '+
+        f.sunEl+'°');
+    } else { info.push('☀ Sun below horizon'); }
+  }
+  document.getElementById('navInfo').innerHTML=info.join('<br>');
+}
 function draw(i){
   const U = DS().units;
   idx = (i + U.length) % U.length; selRel = 0;
@@ -290,10 +373,10 @@ function draw(i){
   document.querySelectorAll('#relTbl tr[data-k]').forEach(tr => {
     tr.onclick = () => { selRel=+tr.dataset.k;
       document.querySelectorAll('#relTbl tr').forEach(x=>x.classList.remove('sel'));
-      tr.classList.add('sel'); drawCloud(); };
+      tr.classList.add('sel'); drawCloud(); drawNav(); };
   });
   document.getElementById('birdSel').value = idx;
-  drawCloud();
+  drawCloud(); drawNav();
 }
 
 // ---------- heatmap ----------
@@ -339,8 +422,13 @@ function setMode(m){
   document.getElementById('heatMode').style.display=m==='heat'?'block':'none';
   if(m==='bird'){
     if(heatLayer){map.removeLayer(heatLayer);heatLayer=null;}
-    map.addLayer(trackLayer); map.addLayer(cloudLayer); draw(idx);
-  } else { map.removeLayer(trackLayer); map.removeLayer(cloudLayer); drawHeat(); }
+    map.addLayer(trackLayer); map.addLayer(cloudLayer); map.addLayer(navLayer);
+    draw(idx);
+  } else {
+    map.removeLayer(trackLayer); map.removeLayer(cloudLayer);
+    map.removeLayer(navLayer); document.getElementById('sunShade').style.display='none';
+    drawHeat();
+  }
 }
 function initDataset(){
   selGroups = new Set(DS().groups);
@@ -354,6 +442,7 @@ function initDataset(){
   const wx=DS().hasWeather;
   document.getElementById('cloudTogWrap').style.display=wx?'flex':'none';
   document.getElementById('cloudLeg').style.display=wx?'block':'none';
+  document.getElementById('sunTogWrap').style.display=wx?'flex':'none';
   idx=0; buildHeatControls(); setMode(mode);
 }
 // dataset buttons
@@ -371,6 +460,9 @@ document.getElementById('birdSel').onchange=e=>draw(+e.target.value);
 document.getElementById('prev').onclick=()=>draw(idx-1);
 document.getElementById('next').onclick=()=>draw(idx+1);
 document.getElementById('cloudTog').onchange=drawCloud;
+document.getElementById('sunTog').onchange=drawNav;
+document.getElementById('geoTog').onchange=drawNav;
+map.on('moveend', ()=>{ if(mode==='bird') drawNav(); });
 document.getElementById('modeBird').onclick=()=>setMode('bird');
 document.getElementById('modeHeat').onclick=()=>setMode('heat');
 document.getElementById('stageAll').onchange=e=>{

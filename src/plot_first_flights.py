@@ -67,7 +67,7 @@ def main():
         ax.grid(True, ls=":", alpha=0.4)
         print(f"No basemap ({e}); plotted on plain axes")
 
-    out = "first_flights_map.png"
+    out = "figures/first_flights_map.png"
     fig.savefig(out, dpi=150, bbox_inches="tight")
     print(f"Saved {out}")
     print("Per-route flights plotted:", plotted)

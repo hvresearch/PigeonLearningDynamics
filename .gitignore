@@ -5,6 +5,8 @@ data/
 2021/
 # raw archives: raw_data.zip, Flack+et+al_*.zip, figshare.zip
 *.zip
+# DEM tile mosaic cache (14 MB; regenerate with src/terrain_agl.py)
+terrain_dem.npz
 
 # Python
 __pycache__/
