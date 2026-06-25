@@ -4,10 +4,11 @@
 #
 # Adapted from p786_project_VAEs.jl. The VAE core / loss / training loop are
 # unchanged; the image datasets are replaced by pigeon trajectories extracted
-# exactly as in plot_data.jl. Each trajectory (a sequence of lat/long points)
-# is padded to a common length and fed to a VAE with a 2-D latent space and a
-# 4-hidden-layer encoder/decoder, to check whether the runs cluster in latent
-# space (e.g. by release site).
+# exactly as in plot_data.jl. Each trajectory (a sequence of lat/long points) is
+# resampled to a fixed length (N_POINTS) and fed to a VAE with a 2-D latent space
+# and a 4-hidden-layer encoder/decoder, to check whether the runs cluster in
+# latent space (e.g. by release site). A legacy pad-and-mask prep mode is also
+# available (prep = :pad) for the padding-alignment diagnostic.
 #
 # Stack: Flux.jl (model/training), CSV.jl + DataFrames.jl (data), Plots.jl.
 #
@@ -191,6 +192,27 @@ end
 # returns the trajectory unchanged.
 downsample(v::AbstractVector, step::Int) = step <= 1 ? collect(v) : collect(@view v[1:step:end])
 
+# Resample a trajectory of any length T to exactly `n` points by linear
+# interpolation over its index range [1, T]. This makes every trajectory the
+# same length with no padding. Endpoints are preserved (first -> first, last ->
+# last); a length-1 trajectory is repeated.
+function resample(v::AbstractVector, n::Int)
+    T = length(v)
+    T == n && return collect(float.(v))
+    T <= 1 && return fill(Float64(first(v)), n)
+    out = Vector{Float64}(undef, n)
+    for (m, x) in enumerate(range(1.0, float(T); length = n))   # n query positions across [1, T]
+        lo = floor(Int, x)
+        if lo >= T
+            out[m] = float(v[T])
+        else
+            f = x - lo
+            out[m] = (1 - f) * v[lo] + f * v[lo + 1]            # interpolate between neighbors
+        end
+    end
+    return out
+end
+
 # Number of padding points to place before / after a length-T trajectory in a
 # length-L window. Shared by pad_series and the loss mask so they always agree.
 function pad_counts(T::Int, L::Int, align::Symbol)
@@ -214,31 +236,43 @@ function pad_series(v::AbstractVector, L::Int; align::Symbol = :center)
 end
 
 # Build the (input_dim, N) feature matrix plus label vectors.
-# A trajectory becomes [normalized padded lats; normalized padded longs],
-# so input_dim = 2L.
+# A trajectory becomes [normalized lats; normalized longs], so input_dim = 2L.
+#
+# Two data-prep modes:
+#   prep = :resample (default) -> every trajectory linearly resampled to N_POINTS
+#                                 points. No padding, mask is all ones, L = N_POINTS.
+#   prep = :pad                -> downsample by DOWNSAMPLE, then pad to the max
+#                                 length with the start/end point; `align` and the
+#                                 0/1 mask apply (used by run_alignment_comparison).
 #
 # NORMALIZATION IS A SINGLE GLOBAL FUNCTION SHARED BY ALL TRAJECTORIES: the
-# constants (lat_a, lat_b, lon_a, lon_b) are computed ONCE over all 468
+# constants (lat_a, lat_b, lon_a, lon_b) are computed ONCE over all included
 # trajectories and the identical affine map  x -> (x - a) / b  is applied to
 # every one. Two choices, both global:
 #   normalization = :minmax  ->  a = min,  b = max - min   (targets in [0,1]; use sigmoid output)
 #   normalization = :zscore  ->  a = mean, b = std         (mean 0 / std 1; use identity output)
 # De-normalize anywhere with  x = xnorm * b + a.
 function build_dataset(lats, longs; align::Symbol = :center, normalization::Symbol = :minmax,
-                       sites = 1:N_SITE)
+                       sites = 1:N_SITE, prep::Symbol = :resample)
     site_ids = collect(sites)
     triples  = [(i, j, k) for i in site_ids for j in 1:N_PIGEON for k in 1:N_RUN]  # k fastest
 
-    # Temporally downsample every trajectory ONCE (keep every DOWNSAMPLE-th point),
-    # then build everything (max length, normalization, padding) from these.
-    dlat = Dict(t => downsample(lats[t...],  DOWNSAMPLE) for t in triples)
-    dlon = Dict(t => downsample(longs[t...], DOWNSAMPLE) for t in triples)
-
-    L = maximum(length(dlat[t]) for t in triples)                   # max downsampled length
+    # Preprocess every trajectory ONCE; everything below is built from these.
+    if prep === :resample
+        proc_lat = Dict(t => resample(lats[t...],  N_POINTS) for t in triples)
+        proc_lon = Dict(t => resample(longs[t...], N_POINTS) for t in triples)
+        L = N_POINTS                                                # every trajectory is now this long
+    elseif prep === :pad
+        proc_lat = Dict(t => downsample(lats[t...],  DOWNSAMPLE) for t in triples)
+        proc_lon = Dict(t => downsample(longs[t...], DOWNSAMPLE) for t in triples)
+        L = maximum(length(proc_lat[t]) for t in triples)          # pad up to the longest
+    else
+        error("prep must be :resample or :pad")
+    end
 
     # Flatten every included coordinate once, to compute the shared constants.
-    all_lat = reduce(vcat, (dlat[t] for t in triples))
-    all_lon = reduce(vcat, (dlon[t] for t in triples))
+    all_lat = reduce(vcat, (proc_lat[t] for t in triples))
+    all_lon = reduce(vcat, (proc_lon[t] for t in triples))
 
     if normalization === :minmax
         lat_a, lat_b = minimum(all_lat), maximum(all_lat) - minimum(all_lat)
@@ -251,7 +285,7 @@ function build_dataset(lats, longs; align::Symbol = :center, normalization::Symb
     end
     lat_b = lat_b == 0 ? 1.0 : lat_b
     lon_b = lon_b == 0 ? 1.0 : lon_b
-    @info "Shared global normalization (same function for every trajectory in this run)" sites = site_ids normalization downsample = DOWNSAMPLE max_len = L lat_a lat_b lon_a lon_b
+    @info "Shared global normalization (same function for every trajectory in this run)" sites = site_ids prep length = L normalization lat_a lat_b lon_a lon_b
 
     N = length(triples)
     X    = Array{Float32}(undef, 2L, N)
@@ -262,21 +296,26 @@ function build_dataset(lats, longs; align::Symbol = :center, normalization::Symb
 
     for (col, t) in enumerate(triples)
         i, j, k = t
-        T = length(dlat[t])
-        pre, post = pad_counts(T, L, align)
-        plat = pad_series(dlat[t], L; align = align)
-        plon = pad_series(dlon[t], L; align = align)
+        if prep === :resample
+            plat, plon = proc_lat[t], proc_lon[t]                   # already length L
+            rm = ones(Float32, L)                                   # no padding -> all real
+        else
+            T = length(proc_lat[t])
+            pre, post = pad_counts(T, L, align)
+            plat = pad_series(proc_lat[t], L; align = align)
+            plon = pad_series(proc_lon[t], L; align = align)
+            rm = vcat(zeros(Float32, pre), ones(Float32, T), zeros(Float32, post))
+        end
         latn = (plat .- lat_a) ./ lat_b                             # identical map for all trajectories
         lonn = (plon .- lon_a) ./ lon_b
         X[:, col]  = Float32.(vcat(latn, lonn))
-        rm = vcat(zeros(Float32, pre), ones(Float32, T), zeros(Float32, post))  # real-point mask
         mask[:, col] = vcat(rm, rm)                                 # same pattern for lat & lon blocks
         site[col]  = i
         pid[col]   = j
         run[col]   = k
     end
 
-    meta = (; L, normalization, lat_a, lat_b, lon_a, lon_b, mask, sites = site_ids)
+    meta = (; L, prep, normalization, lat_a, lat_b, lon_a, lon_b, mask, sites = site_ids)
     return X, site, pid, run, meta
 end
 
@@ -313,7 +352,7 @@ end
 # "learning dynamics" variable: do later runs converge/separate from early ones?
 function plot_latent_by_run(model, X, run; z_dim::Int = Z_DIM)
     z = latent_coords(model, X)
-    runpal = palette(:thermal, N_RUN)     # 6 DISTINCT colors sampled from thermal
+    runpal = palette(:viridis, N_RUN)     # 6 DISTINCT colors sampled from viridis
     latent_scatter(z, z_dim, "Pigeon trajectories in VAE latent space (by run)";
                    group = ["run $r" for r in run], palette = runpal, legend = :outertopright)
 end
@@ -388,8 +427,6 @@ function run_one_site(site_id::Int; data_root::AbstractString = "data",
     else
         train!(model, opt, DataLoader((X, pid); batchsize = batchsize, shuffle = true), epochs)
     end
-    display(plot_reconstruction(model, X, meta, 1))
-    
     return model, (; X, site, pid, run, meta)
 end
 
@@ -400,11 +437,11 @@ end
 function run_sites_separately(; data_root::AbstractString = "data",
                                 z_dim::Int = Z_DIM,
                                 align::Symbol = :center, normalization::Symbol = :minmax,
-                                hidden_dims::Vector{Int} = [1024,256, 128, 32],
+                                hidden_dims::Vector{Int} = [1024, 256, 64, 16],
                                 epochs::Int = 200, batchsize::Int = 64,
                                 masked::Bool = false, seed::Int = 0)
     preloaded = load_pigeon_trajectories(; data_root = data_root)
-    runpal = palette(:thermal, N_RUN)     # 6 distinct colors, one per run
+    runpal = palette(:viridis, N_RUN)     # 6 distinct colors, one per run
     panels = Any[]
     for s in 1:N_SITE
         println("=== Release site R$s ===")
@@ -417,7 +454,7 @@ function run_sites_separately(; data_root::AbstractString = "data",
                                      group = ["run $r" for r in d.run],
                                      palette = runpal, legend = :outertopright))
     end
-    plt = plot(panels...; layout = (1, N_SITE), size = (1400, 700),
+    plt = plot(panels...; layout = (N_SITE, 1), size = (700, 1400),
                plot_title = "Within-site latent clustering (each site its own VAE)")
     display(plt)
     return plt
@@ -429,7 +466,7 @@ end
 function run_alignment_comparison(; data_root::AbstractString = "data",
                                     z_dim::Int = Z_DIM,
                                     normalization::Symbol = :minmax,
-                                    hidden_dims::Vector{Int} = [1024, 256, 128, 32],
+                                    hidden_dims::Vector{Int} = [1024, 256, 64, 16],
                                     epochs::Int = 200, batchsize::Int = 64,
                                     seed::Int = 0)
     lats, longs = load_pigeon_trajectories(; data_root = data_root)
@@ -442,7 +479,7 @@ function run_alignment_comparison(; data_root::AbstractString = "data",
     # Panels 1-3: standard (unmasked) loss under each alignment.
     unmasked = map((:pre, :center, :post)) do align
         Random.seed!(seed)   # same init/shuffle across panels -> fair comparison
-        X, site, _, _, _ = build_dataset(lats, longs; align = align, normalization = normalization)
+        X, site, _, _, _ = build_dataset(lats, longs; align = align, normalization = normalization, prep = :pad)
         model = device(VAE(z_dim; input_dim = size(X, 1), hidden_dims = hidden_dims, out = out))
         opt   = setup(Adam(1f-3), model)
         println("=== align = :$align (unmasked) ===")
@@ -452,7 +489,7 @@ function run_alignment_comparison(; data_root::AbstractString = "data",
 
     # Panel 4: masked loss. Alignment is irrelevant here, so :center is used.
     Random.seed!(seed)
-    Xm, sitem, _, _, metam = build_dataset(lats, longs; align = :center, normalization = normalization)
+    Xm, sitem, _, _, metam = build_dataset(lats, longs; align = :center, normalization = normalization, prep = :pad)
     modelm = device(VAE(z_dim; input_dim = size(Xm, 1), hidden_dims = hidden_dims, out = out))
     optm   = setup(Adam(1f-3), modelm)
     println("=== masked (alignment-invariant) ===")
@@ -476,6 +513,7 @@ if abspath(PROGRAM_FILE) == @__FILE__
     run_sites_separately(; data_root = "data")
 
     # Padding-alignment + masked-loss diagnostic (all sites):
+    # run_alignment_comparison(; data_root = "data")
 end
 
 # ---------------------------------------------------------------------------
@@ -490,7 +528,14 @@ Z_DIM = 2
 # feeding it to the VAE. 1 = no downsampling. Larger values shrink the input
 # dimension (input_dim = 2L) proportionally, which makes the big first Dense
 # layer and GPU memory far more manageable.
-DOWNSAMPLE = 5
+# NOTE: only used by the :pad data-prep mode. The default :resample mode ignores
+# it (resampling to a fixed length controls the input dimension directly).
+DOWNSAMPLE = 10
+
+# Fixed-length resampling: every trajectory is linearly interpolated to exactly
+# N_POINTS points (default data-prep mode). This removes padding entirely, so
+# there is nothing to mask and trajectory length can't leak into the latent code.
+# input_dim = 2 * N_POINTS.
+N_POINTS = 1500
 
 run_sites_separately(; data_root = "data")
-run_alignment_comparison(; data_root = "data")
