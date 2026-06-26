@@ -206,6 +206,22 @@ function plot_trajectory_traces(trajectories; group_size=26, save_html=nothing)
     display(p)
 end
 
-trajectories_s = sample_trajectories(trajectories; sampling=10)
+function score_flight(trajectory)
+    m = (trajectory[2][end] - trajectory[2][1])/(trajectory[1][end] - trajectory[1][1])
+    b = trajectory[2][1]
+    score = mean([(m*trajectory[1][i] + b - trajectory[2][i])/sqrt(1+m^2) for i in axes(trajectory[1],1)])
+    mean_lat, mean_long = mean(trajectory[1]), mean(trajectory[2])
+    return score, mean_lat, mean_long
+end
 
+function get_scores(trajectories)
+    scores, mean_lats, mean_longs = [
+        score_flight(trajectories[i,j,k]) for i in 1:3, j in 1:26, k in 1:6
+    ]
+    return scores, mean_lats, mean_longs
+end
+
+trajectories_s = sample_trajectories(trajectories; sampling=10)
 plot_trajectory_traces(trajectories_s[3,:,1:6]; group_size=26, save_html="PigeonLearningDynamics/vis-R3-ts_10.html")
+
+scores, mean_lats, mean_longs = get_scores(trajectories_s)
