@@ -460,11 +460,12 @@ function plot_trajectory_with_roads(trajectories, road_indices, roads, site, pig
 end
 
 function add_trajectory_with_roads!(p, trajectories, road_indices, roads, site, pigeon, run;
-                                    traj_color="red", road_color="blue")
+                                    traj_color="red", road_color="blue", save_html=nothing)
     road_t, traj_t = trajectory_with_roads_traces(trajectories, road_indices, roads,
                                                   site, pigeon, run;
                                                   traj_color=traj_color, road_color=road_color)
     PlotlyJS.addtraces!(p, road_t, traj_t)
+    save_html !== nothing && PlotlyJS.savefig(p, save_html)
     return p
 end
 
@@ -474,4 +475,30 @@ writedlm("PigeonLearningDynamics/data/road_indices-trajectories.txt",road_indice
 writedlm("PigeonLearningDynamics/data/road_distances-trajectories.txt",road_distances)
 
 road_indices_dd = dedup_road_indices(road_indices)
-plot_trajectory_with_roads(trajectories_s,road_indices_dd,roads,1,1,1)
+p_road_trajs = plot_trajectory_with_roads(trajectories_s,road_indices_dd,roads,1,1,1)
+add_trajectory_with_roads!(p_road_trajs,trajectories_s,road_indices_dd,roads,1,10,1)
+add_trajectory_with_roads!(p_road_trajs,trajectories_s,road_indices_dd,roads,1,1,6)
+add_trajectory_with_roads!(p_road_trajs,trajectories_s,road_indices_dd,roads,1,10,6)
+findmin(road_distances[1,:,:])
+findmax(road_distances[1,:,:])
+
+
+
+for i in 1:3
+    bin_bounds = extrema(road_distances[i,:,:])
+    bins = bin_bounds[1]:(bin_bounds[2]-bin_bounds[1])/20:bin_bounds[2]
+    Plots.stephist(road_distances[i,:,1],bins=bins)
+    Plots.stephist!(road_distances[i,:,6],bins=bins)
+    Plots.savefig(FIGPATH*"road_scores-$(i).svg")
+    distmin, idxmin = findmin(road_distances[i,:,:])
+    distmax, idxmax = findmax(road_distances[i,:,:])
+    p_road_trajs = plot_trajectory_with_roads(
+        trajectories_s,road_indices_dd,roads,i,idxmax[1],idxmax[2];
+        traj_color=palette_colors[i],road_color=palette_colors[i]
+        )
+    add_trajectory_with_roads!(
+        p_road_trajs,trajectories_s,road_indices_dd,roads,i,idxmin[1],idxmin[2];
+        traj_color=palette_colors[2i],road_color=palette_colors[2i]
+        )
+    PlotlyJS.savefig(FIGPATH*"traj_roads-$(i).html")
+end
