@@ -225,7 +225,7 @@ end
 trajectories_s = sample_trajectories(trajectories; sampling=10)
 plot_trajectory_traces(trajectories_s[3,:,1:6]; group_size=26, save_html="PigeonLearningDynamics/vis-R3-ts_10.html")
 
-scores, mean_lats, mean_longs = get_scores(trajectories_s)
+scores, mean_lats, mean_longs = get_scores(trajectories_s)                    
 
 function combine_scores(scores;num_runs=2)
     run_dims = Int(size(scores,3)/num_runs)
@@ -241,6 +241,7 @@ end
 function plot_clusters(scores, mean_lats, mean_longs, trajectories)
     score_plots = []
     mean_plots = []
+    mean_tplots = []
     for i in 1:3
         binmin, binmax = extrema(scores[i,:,3])
         p = Plots.histogram(title="site = $(i)")
@@ -254,57 +255,69 @@ function plot_clusters(scores, mean_lats, mean_longs, trajectories)
     for i in 1:3
         q = Plots.plot(title="site = $(i)")
         for j in 1:6
-            Plots.scatter!(mean_longs[i,:,j],mean_lats[i,:,j],label="run $(j)",color=palette_colors[j],ma=0.7, msw=0)
+            q = Plots.plot(title="site = $(i)")
+            for jj in 1:j-1
+                Plots.scatter!(q, mean_longs[i,:,jj], mean_lats[i,:,jj], label="run $(jj)", color=:gray, ma=0.3, msw=0)
+            end
+            Plots.scatter!(q, mean_longs[i,:,j], mean_lats[i,:,j], label="run $(j)", color=palette_colors[j], ma=0.8, msw=0)
+            push!(mean_plots, q)
         end
-        push!(mean_plots,q)
     end
 
-    mean_tplots = []
     mean_traj_lats = zeros(size(mean_lats,1),size(mean_lats,3))
     mean_traj_longs = zeros(size(mean_longs,1),size(mean_longs,3))
     std_traj_lats = zeros(size(mean_lats,1),size(mean_lats,3))
     std_traj_longs = zeros(size(mean_longs,1),size(mean_longs,3))
     for i in 1:3
+        optimal_lat = 0.5 * (trajectories[i,1,1][1][1] + trajectories[i,1,1][1][end])
+        optimal_long = 0.5 * (trajectories[i,1,1][2][1] + trajectories[i,1,1][2][end])
+
         r = Plots.plot(title="site = $(i)")
         for j in 1:6
-            mean_traj_lats[i,j] = mean([trajectories[i,k,j][1] for k in axes(scores,2)])
-            mean_traj_longs[i,j] = mean([trajectories[i,k,j][2] for k in axes(scores,2)])
-            std_traj_lats[i,j] = std([trajectories[i,k,j][1] for k in axes(scores,2)])
-            std_traj_longs[i,j] = std([trajectories[i,k,j][2] for k in axes(scores,2)])
-        end
-        Plots.scatter!(
-            mean_traj_longs[i,:],mean_traj_lats[i,:],
-            xerror=std_traj_longs, yerror=std_traj_lats,
-            label=:false,color=:blue
+            mean_traj_lats[i,j] = mean(mean_lats[i,:,j])
+            mean_traj_longs[i,j] = mean(mean_longs[i,:,j])
+            std_traj_lats[i,j] = std(mean_lats[i,:,j])
+            std_traj_longs[i,j] = std(mean_longs[i,:,j])
+            Plots.scatter!(
+                (mean_traj_longs[i,j],mean_traj_lats[i,j]),
+                xerror=std_traj_longs[i,j], yerror=std_traj_lats[i,j],
+                label="run $(j)",color=palette_colors[j], msw=0.2
             )
+        end
+        Plots.scatter!((optimal_long,optimal_lat),label="optimal mean",color=:gray,ma=0.5)
         push!(mean_tplots,r)
     end
     return score_plots, mean_plots, mean_tplots
 end
 
-function clean_trajectories(trajectories)
-    tlats, tlongs = [], []
-    for i in axes(trajectories,1)
-        for j in axes(trajectories,2)
-            for k in axes(trajectories,3)
-                push!(tlats,trajectories[i,j,k][1])
-                push!(tlongs,trajectories[i,j,k][2])
-            end
-        end
-    end
-    return tlats, tlongs
-end
+FIGPATH = "PigeonLearningDynamics/figures/"
 
-clean_lats, clean_longs = clean_trajectories(trajectories_s)
 scores_combined = combine_scores(scores;num_runs=2)
 scoreplots, meanplots, mean_tplots = plot_clusters(scores_combined, mean_lats, mean_longs, trajectories_s)
-Plots.plot(scoreplots..., layout=(2,2), size=(700,700), plot_title="trajectory scores")
-Plots.plot(meanplots..., layout=(2,2), size=(700,700), plot_title="mean trajectory location")
+Plots.plot(scoreplots..., layout=(2,2), size=(1000,1000), plot_title="trajectory scores")
+Plots.savefig(FIGPATH*"flight_scores-i.svg")
+Plots.plot(meanplots..., layout=(3,6), size=(3000,1500), plot_title="mean trajectory location")
+Plots.savefig(FIGPATH*"flight_means-i.svg")
+Plots.plot(mean_tplots...,layout=(2,2),size=(1000,1000), plot_title="mean trajectories vs run")
+Plots.savefig(FIGPATH*"flight_means-i-p.svg")
 
-Plots.savefig("PigeonLearningDynamics/figures/flight_scores-i.svg")
+function score_means(scores)
+    mean_scores = [mean(scores[i,:,k]) for i in axes(scores,1), k in axes(scores,3)]
+    return mean_scores
+end
 
-road_trace
+mean_scores = score_means(scores)
 
-(trajectories_s[1,1,1])
+function plot_score_means(mean_scores)
+    plots_mean_scores = []
+    for i in axes(mean_scores,1)
+        p = Plots.plot(title="site $(i)")
+        Plots.plot!(p,mean_scores[i,:],xlabel="run #",ylabel="mean score",label=:none)
+        push!(plots_mean_scores,p)
+    end
+    return plots_mean_scores
+end
 
-size(scores)
+mean_score_plots = plot_score_means(mean_scores)
+
+Plots.plot(mean_score_plots...)
