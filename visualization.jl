@@ -414,8 +414,8 @@ function dedup_road_indices(road_indices)
     return deduped
 end
 
-function plot_trajectory_with_roads(trajectories, road_indices, roads, site, pigeon, run;
-                                    save_html=nothing)
+function trajectory_with_roads_traces(trajectories, road_indices, roads, site, pigeon, run;
+                                      traj_color="red", road_color="blue")
     tlats, tlons = trajectories[site, pigeon, run]
     indices = road_indices[site, pigeon, run]
     selected_roads = roads[indices]
@@ -423,16 +423,24 @@ function plot_trajectory_with_roads(trajectories, road_indices, roads, site, pig
 
     selected_road_trace = scattermapbox(
         lat=sel_lats, lon=sel_lons, mode="lines",
-        line=attr(width=3, color="blue"),
-        name="closest roads", hoverinfo="none",
+        line=attr(width=3, color=road_color),
+        name="roads ($site,$pigeon,$run)", hoverinfo="none",
     )
     traj_trace = scattermapbox(
         lat=tlats, lon=tlons, mode="lines+markers",
-        line=attr(width=2, color="red"),
-        marker=attr(size=5, color="red"),
-        name="trajectory (site=$site, pigeon=$pigeon, run=$run)",
-        hoverinfo="none",
+        line=attr(width=2, color=traj_color),
+        marker=attr(size=5, color=traj_color),
+        name="trajectory ($site,$pigeon,$run)", hoverinfo="none",
     )
+    return selected_road_trace, traj_trace
+end
+
+function plot_trajectory_with_roads(trajectories, road_indices, roads, site, pigeon, run;
+                                    traj_color="red", road_color="blue", save_html=nothing)
+    tlats, tlons = trajectories[site, pigeon, run]
+    road_t, traj_t = trajectory_with_roads_traces(trajectories, road_indices, roads,
+                                                  site, pigeon, run;
+                                                  traj_color=traj_color, road_color=road_color)
 
     layout = Layout(
         mapbox=attr(
@@ -445,12 +453,18 @@ function plot_trajectory_with_roads(trajectories, road_indices, roads, site, pig
         height=800, width=1200,
     )
 
-    p = PlotlyJS.plot(
-        [road_trace, hedge_trace, tree_trace, selected_road_trace, traj_trace],
-        layout,
-    )
+    p = PlotlyJS.plot([road_trace, hedge_trace, tree_trace, road_t, traj_t], layout)
     save_html !== nothing && PlotlyJS.savefig(p, save_html)
     display(p)
+    return p
+end
+
+function add_trajectory_with_roads!(p, trajectories, road_indices, roads, site, pigeon, run;
+                                    traj_color="red", road_color="blue")
+    road_t, traj_t = trajectory_with_roads_traces(trajectories, road_indices, roads,
+                                                  site, pigeon, run;
+                                                  traj_color=traj_color, road_color=road_color)
+    PlotlyJS.addtraces!(p, road_t, traj_t)
     return p
 end
 
@@ -459,5 +473,5 @@ road_indices, road_distances = nearest_roads(trajectories_s, roads; nthreads=Thr
 writedlm("PigeonLearningDynamics/data/road_indices-trajectories.txt",road_indices)
 writedlm("PigeonLearningDynamics/data/road_distances-trajectories.txt",road_distances)
 
-road_indices
-road_distances
+road_indices_dd = dedup_road_indices(road_indices)
+plot_trajectory_with_roads(trajectories_s,road_indices_dd,roads,1,1,1)
