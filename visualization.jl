@@ -23,9 +23,6 @@ for i in 1:3, j in 1:26, k in 1:6
 end
 display(all_trajs)
 
-lats[1,1,1]
-longs[1,1,1]
-
 # --- Your trajectory data (replace with your real trajectories) ---
 trajectories = [
     (lats[i,j,k], longs[i,j,k]) for i in 1:3, j in 1:26, k in 1:6
@@ -225,7 +222,7 @@ end
 trajectories_s = sample_trajectories(trajectories; sampling=10)
 plot_trajectory_traces(trajectories_s[3,:,1:6]; group_size=26, save_html="PigeonLearningDynamics/vis-R3-ts_10.html")
 
-scores, mean_lats, mean_longs = get_scores(trajectories_s)                    
+scores, mean_lats, mean_longs = get_scores(trajectories_s)
 
 function combine_scores(scores;num_runs=2)
     run_dims = Int(size(scores,3)/num_runs)
@@ -284,7 +281,7 @@ function plot_clusters(scores, mean_lats, mean_longs, trajectories)
                 label="run $(j)",color=palette_colors[j], msw=0.2
             )
         end
-        Plots.scatter!((optimal_long,optimal_lat),label="optimal mean",color=:gray,ma=0.5)
+        Plots.scatter!((optimal_long,optimal_lat),label="optimal",color=:gray,ma=0.5)
         push!(mean_tplots,r)
     end
     return score_plots, mean_plots, mean_tplots
@@ -306,8 +303,6 @@ function score_means(scores)
     return mean_scores
 end
 
-mean_scores = score_means(scores)
-
 function plot_score_means(mean_scores)
     plots_mean_scores = []
     for i in axes(mean_scores,1)
@@ -318,6 +313,38 @@ function plot_score_means(mean_scores)
     return plots_mean_scores
 end
 
-mean_score_plots = plot_score_means(mean_scores)
+function nearest_roads(trajectories, roads)
+    road_indices = Array{Vector{Int}}(undef, size(trajectories))
+    total_distances = Array{Float64}(undef, size(trajectories))
 
-Plots.plot(mean_score_plots...)
+    for idx in CartesianIndices(trajectories)
+        tlats, tlons = trajectories[idx]
+        n_points = length(tlats)
+        indices = Vector{Int}(undef, n_points)
+        total_dist = 0.0
+
+        for p in 1:n_points
+            plat, plon = tlats[p], tlons[p]
+            min_dist_sq = Inf
+            min_road_idx = 0
+            for r in eachindex(roads)
+                for (rlat, rlon) in roads[r]
+                    d = (plat - rlat)^2 + (plon - rlon)^2
+                    if d < min_dist_sq
+                        min_dist_sq = d
+                        min_road_idx = r
+                    end
+                end
+            end
+            indices[p] = min_road_idx
+            total_dist += sqrt(min_dist_sq)
+        end
+
+        road_indices[idx] = indices
+        total_distances[idx] = total_dist
+    end
+
+    return road_indices, total_distances
+end
+
+road_indices, road_distances = nearest_roads(trajectories_s, roads)
