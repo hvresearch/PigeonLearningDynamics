@@ -313,38 +313,151 @@ function plot_score_means(mean_scores)
     return plots_mean_scores
 end
 
-function nearest_roads(trajectories, roads)
+function site_bbox(trajectories_site; pad=0.0)
+    all_lats = Float64[]
+    all_lons = Float64[]
+    for traj in trajectories_site
+        append!(all_lats, traj[1])
+        append!(all_lons, traj[2])
+    end
+    return (south=minimum(all_lats) - pad, west=minimum(all_lons) - pad,
+            north=maximum(all_lats) + pad, east=maximum(all_lons) + pad)
+end
+
+function flatten_roads_in_bbox(roads, bbox)
+    rlats = Float64[]
+    rlons = Float64[]
+    rids  = Int[]
+    for (r, road) in enumerate(roads)
+        any_inside = any(p -> bbox.south <= p[1] <= bbox.north &&
+                              bbox.west  <= p[2] <= bbox.east, road)
+        any_inside || continue
+        for (lat, lon) in road
+            push!(rlats, lat)
+            push!(rlons, lon)
+            push!(rids,  r)
+        end
+    end
+    return rlats, rlons, rids
+end
+
+function nearest_roads(trajectories, roads; nthreads=Threads.nthreads(), pad=0.0)
     road_indices = Array{Vector{Int}}(undef, size(trajectories))
     total_distances = Array{Float64}(undef, size(trajectories))
 
-    for idx in CartesianIndices(trajectories)
-        tlats, tlons = trajectories[idx]
-        n_points = length(tlats)
-        indices = Vector{Int}(undef, n_points)
-        total_dist = 0.0
+    total_trajs = length(trajectories)
+    done = Threads.Atomic{Int}(0)
 
-        for p in 1:n_points
-            plat, plon = tlats[p], tlons[p]
-            min_dist_sq = Inf
-            min_road_idx = 0
-            for r in eachindex(roads)
-                for (rlat, rlon) in roads[r]
-                    d = (plat - rlat)^2 + (plon - rlon)^2
-                    if d < min_dist_sq
-                        min_dist_sq = d
-                        min_road_idx = r
+    for site in axes(trajectories, 1)
+        site_view = @view trajectories[site, :, :]
+        bbox = site_bbox(site_view; pad=pad)
+        rlats, rlons, rids = flatten_roads_in_bbox(roads, bbox)
+
+        all_idx = collect(CartesianIndices(size(site_view)))
+        chunk_size = max(1, cld(length(all_idx), nthreads))
+        chunks = collect(Iterators.partition(all_idx, chunk_size))
+
+        @sync for chunk in chunks
+            Threads.@spawn for c in chunk
+                j, k = Tuple(c)
+                tlats, tlons = trajectories[site, j, k]
+                n_points = length(tlats)
+                indices = Vector{Int}(undef, n_points)
+                total_dist = 0.0
+
+                for p in 1:n_points
+                    plat, plon = tlats[p], tlons[p]
+
+                    min_dist_sq = Inf
+                    @inbounds @simd for m in eachindex(rlats)
+                        d = (plat - rlats[m])^2 + (plon - rlons[m])^2
+                        min_dist_sq = ifelse(d < min_dist_sq, d, min_dist_sq)
                     end
+
+                    min_road_idx = 0
+                    @inbounds for m in eachindex(rlats)
+                        d = (plat - rlats[m])^2 + (plon - rlons[m])^2
+                        if d == min_dist_sq
+                            min_road_idx = rids[m]
+                            break
+                        end
+                    end
+
+                    indices[p] = min_road_idx
+                    total_dist += sqrt(min_dist_sq)
+                end
+
+                road_indices[site, j, k] = indices
+                total_distances[site, j, k] = total_dist
+
+                n_done = Threads.atomic_add!(done, 1) + 1
+                if n_done % 5 == 0
+                    println("Processed $n_done / $total_trajs trajectories")
                 end
             end
-            indices[p] = min_road_idx
-            total_dist += sqrt(min_dist_sq)
         end
-
-        road_indices[idx] = indices
-        total_distances[idx] = total_dist
     end
 
     return road_indices, total_distances
 end
 
-road_indices, road_distances = nearest_roads(trajectories_s, roads)
+function dedup_road_indices(road_indices)
+    deduped = Array{Vector{Int}}(undef, size(road_indices))
+    for i in eachindex(road_indices)
+        seq = road_indices[i]
+        out = Int[]
+        for r in seq
+            (isempty(out) || out[end] != r) && push!(out, r)
+        end
+        deduped[i] = out
+    end
+    return deduped
+end
+
+function plot_trajectory_with_roads(trajectories, road_indices, roads, site, pigeon, run;
+                                    save_html=nothing)
+    tlats, tlons = trajectories[site, pigeon, run]
+    indices = road_indices[site, pigeon, run]
+    selected_roads = roads[indices]
+    sel_lats, sel_lons = merge_lines(selected_roads)
+
+    selected_road_trace = scattermapbox(
+        lat=sel_lats, lon=sel_lons, mode="lines",
+        line=attr(width=3, color="blue"),
+        name="closest roads", hoverinfo="none",
+    )
+    traj_trace = scattermapbox(
+        lat=tlats, lon=tlons, mode="lines+markers",
+        line=attr(width=2, color="red"),
+        marker=attr(size=5, color="red"),
+        name="trajectory (site=$site, pigeon=$pigeon, run=$run)",
+        hoverinfo="none",
+    )
+
+    layout = Layout(
+        mapbox=attr(
+            style="white-bg",
+            center=attr(lat=mean(tlats), lon=mean(tlons)),
+            zoom=14,
+        ),
+        showlegend=true,
+        margin=attr(l=0, r=0, t=0, b=0),
+        height=800, width=1200,
+    )
+
+    p = PlotlyJS.plot(
+        [road_trace, hedge_trace, tree_trace, selected_road_trace, traj_trace],
+        layout,
+    )
+    save_html !== nothing && PlotlyJS.savefig(p, save_html)
+    display(p)
+    return p
+end
+
+road_indices, road_distances = nearest_roads(trajectories_s, roads; nthreads=Threads.nthreads())
+
+writedlm("PigeonLearningDynamics/data/road_indices-trajectories.txt",road_indices)
+writedlm("PigeonLearningDynamics/data/road_distances-trajectories.txt",road_distances)
+
+road_indices
+road_distances
