@@ -251,12 +251,16 @@ function plot_clusters(scores, mean_lats, mean_longs, trajectories)
 
     for i in 1:3
         q = Plots.plot(title="site = $(i)")
+        default(tickfontsize = 14, legendfontsize = 12)
         for j in 1:6
-            q = Plots.plot(title="site = $(i)")
+            q = Plots.plot()
             for jj in 1:j-1
                 Plots.scatter!(q, mean_longs[i,:,jj], mean_lats[i,:,jj], label="run $(jj)", color=:gray, ma=0.3, msw=0)
             end
-            Plots.scatter!(q, mean_longs[i,:,j], mean_lats[i,:,j], label="run $(j)", color=palette_colors[j], ma=0.8, msw=0)
+            Plots.scatter!(
+                q, mean_longs[i,:,j], mean_lats[i,:,j], label="run $(j)", color=palette_colors[j], ma=0.8, msw=0.5,
+                left_margin=5Plots.mm
+                )
             push!(mean_plots, q)
         end
     end
@@ -278,7 +282,7 @@ function plot_clusters(scores, mean_lats, mean_longs, trajectories)
             Plots.scatter!(
                 (mean_traj_longs[i,j],mean_traj_lats[i,j]),
                 xerror=std_traj_longs[i,j], yerror=std_traj_lats[i,j],
-                label="run $(j)",color=palette_colors[j], msw=0.2
+                label="run $(j)",color=palette_colors[j], msw=0.4
             )
         end
         Plots.scatter!((optimal_long,optimal_lat),label="optimal",color=:gray,ma=0.5)
@@ -291,12 +295,25 @@ FIGPATH = "PigeonLearningDynamics/figures/"
 
 scores_combined = combine_scores(scores;num_runs=2)
 scoreplots, meanplots, mean_tplots = plot_clusters(scores_combined, mean_lats, mean_longs, trajectories_s)
-Plots.plot(scoreplots..., layout=(2,2), size=(1000,1000), plot_title="trajectory scores")
-Plots.savefig(FIGPATH*"flight_scores-i.svg")
-Plots.plot(meanplots..., layout=(3,6), size=(3000,1500), plot_title="mean trajectory location")
-Plots.savefig(FIGPATH*"flight_means-i.svg")
+Plots.plot(scoreplots..., layout=(2,2), size=(700,700), plot_title="trajectory scores")
+Plots.savefig(FIGPATH*"flight_scores-i.png")
+Plots.plot(
+    meanplots[1:6]...,layout=(2,3),size=(2000,1000),
+    plot_title="mean trajectory location, site 1"
+    )
+Plots.savefig(FIGPATH*"flight_means-i1.png")
+Plots.plot(
+    meanplots[7:12]...,layout=(2,3),size=(2000,1000),
+    plot_title="mean trajectory location, site 2"
+    )
+Plots.savefig(FIGPATH*"flight_means-i2.png")
+Plots.plot(
+    meanplots[13:18]...,layout=(2,3),size=(2000,1000),
+    plot_title="mean trajectory location, site 3"
+    )
+Plots.savefig(FIGPATH*"flight_means-i3.png")
 Plots.plot(mean_tplots...,layout=(2,2),size=(1000,1000), plot_title="mean trajectories vs run")
-Plots.savefig(FIGPATH*"flight_means-i-p.svg")
+Plots.savefig(FIGPATH*"flight_means-i-p.png")
 
 function score_means(scores)
     mean_scores = [mean(scores[i,:,k]) for i in axes(scores,1), k in axes(scores,3)]
@@ -470,6 +487,15 @@ function add_trajectory_with_roads!(p, trajectories, road_indices, roads, site, 
 end
 
 road_indices, road_distances = nearest_roads(trajectories_s, roads; nthreads=Threads.nthreads())
+size(road_indices[1,1,1])
+road_distances_norm = [road_distances[i,j,k] ./ size(road_indices[i,j,k],1) for i in 1:3, j in 1:26, k in 1:6]
+for i in 1:3
+    mind, _ = findmin(road_distances_norm[i,:,:])
+    maxd, _ = findmax(road_distances_norm[i,:,:])
+    road_distances_norm[i,:,:] .-= mind
+    road_distances_norm[i,:,:] ./= maxd-mind
+end
+road_distances_norm
 
 writedlm("PigeonLearningDynamics/data/road_indices-trajectories.txt",road_indices)
 writedlm("PigeonLearningDynamics/data/road_distances-trajectories.txt",road_distances)
@@ -482,23 +508,22 @@ add_trajectory_with_roads!(p_road_trajs,trajectories_s,road_indices_dd,roads,1,1
 findmin(road_distances[1,:,:])
 findmax(road_distances[1,:,:])
 
-
-
+palette_colors = Plots.palette(:jet,10)
 for i in 1:3
-    bin_bounds = extrema(road_distances[i,:,:])
+    bin_bounds = extrema(road_distances_norm[i,:,:])
     bins = bin_bounds[1]:(bin_bounds[2]-bin_bounds[1])/20:bin_bounds[2]
-    Plots.stephist(road_distances[i,:,1],bins=bins)
-    Plots.stephist!(road_distances[i,:,6],bins=bins)
-    Plots.savefig(FIGPATH*"road_scores-$(i).svg")
+    Plots.stephist(road_distances_norm[i,:,1],bins=bins,label="run 1")
+    Plots.stephist!(road_distances_norm[i,:,6],bins=bins,label="run 6")
+    Plots.savefig(FIGPATH*"road_scores-$(i).png")
     distmin, idxmin = findmin(road_distances[i,:,:])
     distmax, idxmax = findmax(road_distances[i,:,:])
     p_road_trajs = plot_trajectory_with_roads(
-        trajectories_s,road_indices_dd,roads,i,idxmax[1],idxmax[2];
-        traj_color=palette_colors[i],road_color=palette_colors[i]
+        trajectories_s,road_indices_dd,roads,i,5,1;
+        traj_color="orange",road_color="purple"
         )
     add_trajectory_with_roads!(
         p_road_trajs,trajectories_s,road_indices_dd,roads,i,idxmin[1],idxmin[2];
-        traj_color=palette_colors[2i],road_color=palette_colors[2i]
+        traj_color="red",road_color="blue",
+        save_html=FIGPATH*"traj_w_roads-$(i).html"
         )
-    PlotlyJS.savefig(FIGPATH*"traj_roads-$(i).html")
 end
